@@ -217,7 +217,7 @@
               <div class="metric-icon-wrap">🛡️</div>
               <div class="metric-info">
                 <span class="metric-label">Approved Providers</span>
-                <span class="metric-value" id="dashApprovedProviders">18</span>
+                <span class="metric-value" id="dashApprovedProviders">0</span>
                 <span class="metric-delta delta-pos">↑ 100% verified KYC</span>
               </div>
             </div>
@@ -226,7 +226,7 @@
               <div class="metric-icon-wrap">⏳</div>
               <div class="metric-info">
                 <span class="metric-label">Pending Verifications</span>
-                <span class="metric-value" id="dashPendingProviders">3</span>
+                <span class="metric-value" id="dashPendingProviders">0</span>
                 <span class="metric-delta delta-warn">Needs Review Queue</span>
               </div>
             </div>
@@ -235,7 +235,7 @@
               <div class="metric-icon-wrap">📅</div>
               <div class="metric-info">
                 <span class="metric-label">Active Bookings</span>
-                <span class="metric-value" id="dashActiveBookings">4</span>
+                <span class="metric-value" id="dashActiveBookings">0</span>
                 <span class="metric-delta delta-pos">Supabase synchronized</span>
               </div>
             </div>
@@ -244,7 +244,7 @@
               <div class="metric-icon-wrap">🩸</div>
               <div class="metric-info">
                 <span class="metric-label">Active Blood SOS</span>
-                <span class="metric-value" id="dashActiveSos">2</span>
+                <span class="metric-value" id="dashActiveSos">0</span>
                 <span class="metric-delta delta-crit">Emergency triage</span>
               </div>
             </div>
@@ -253,7 +253,7 @@
               <div class="metric-icon-wrap">📜</div>
               <div class="metric-info">
                 <span class="metric-label">Audit Logs Today</span>
-                <span class="metric-value" id="dashAuditCount">42</span>
+                <span class="metric-value" id="dashAuditCount">0</span>
                 <span class="metric-delta delta-pos">100% Append-only</span>
               </div>
             </div>
@@ -262,7 +262,7 @@
               <div class="metric-icon-wrap">👥</div>
               <div class="metric-info">
                 <span class="metric-label">Active Staff</span>
-                <span class="metric-value" id="dashStaffCount">5</span>
+                <span class="metric-value" id="dashStaffCount">0</span>
                 <span class="metric-delta delta-pos">RBAC enforced</span>
               </div>
             </div>
@@ -308,11 +308,11 @@
         <section class="content-view" id="view-providers">
           <div class="section-toolbar">
             <div class="filter-pills" id="providerFilterPills">
-              <button class="filter-pill active" data-filter="all">All Applications (21)</button>
-              <button class="filter-pill" data-filter="pending">Pending Review (3)</button>
-              <button class="filter-pill" data-filter="changes_requested">Changes Requested (1)</button>
-              <button class="filter-pill" data-filter="approved">Approved (16)</button>
-              <button class="filter-pill" data-filter="suspended">Suspended (1)</button>
+              <button class="filter-pill active" data-filter="all">All Applications <span id="pillCountAll">(0)</span></button>
+              <button class="filter-pill" data-filter="pending">Pending Review <span id="pillCountPending">(0)</span></button>
+              <button class="filter-pill" data-filter="changes_requested">Changes Requested <span id="pillCountChanges">(0)</span></button>
+              <button class="filter-pill" data-filter="approved">Approved <span id="pillCountApproved">(0)</span></button>
+              <button class="filter-pill" data-filter="suspended">Suspended <span id="pillCountSuspended">(0)</span></button>
             </div>
 
             <div class="search-and-actions">

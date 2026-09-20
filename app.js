@@ -608,8 +608,8 @@ document.addEventListener('DOMContentLoaded', () => {
           </td>
           <td>${p.experienceYears} Years</td>
           <td>
-            ${p.quizPassed ? '<span title="Safety Quiz Passed">📝 Quiz ✓</span>' : '<span>📝 Quiz ✗</span>'}
-            ${p.policeVerified ? ' • <span title="Police Verified" style="color:var(--doggy-green)">🛡️ Police ✓</span>' : ''}
+            ${p.quizPassed ? '<span title="Safety Quiz Passed" style="color:var(--doggy-green); font-weight:600;">✓ Quiz</span>' : '<span style="color:var(--text-muted)">✗ Quiz</span>'}
+            ${p.policeVerified ? ' • <span title="Police Verified" style="color:var(--doggy-teal); font-weight:600;">🛡️ Police</span>' : ''}
           </td>
           <td>${statusBadge}</td>
           <td>${p.submittedDate}</td>
@@ -623,6 +623,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const pendingCount = providers.filter(p => p.status === 'pending').length;
     const badgeEl = document.getElementById('pendingProvidersCount');
     if (badgeEl) badgeEl.textContent = pendingCount;
+
+    // Update filter pill counts dynamically
+    const pAll = document.getElementById('pillCountAll');
+    if (pAll) pAll.textContent = `(${providers.length})`;
+    const pPending = document.getElementById('pillCountPending');
+    if (pPending) pPending.textContent = `(${pendingCount})`;
+    const pChanges = document.getElementById('pillCountChanges');
+    if (pChanges) pChanges.textContent = `(${providers.filter(p => p.status === 'changes_requested').length})`;
+    const pApproved = document.getElementById('pillCountApproved');
+    if (pApproved) pApproved.textContent = `(${providers.filter(p => p.status === 'approved').length})`;
+    const pSuspended = document.getElementById('pillCountSuspended');
+    if (pSuspended) pSuspended.textContent = `(${providers.filter(p => p.status === 'suspended').length})`;
   }
 
   function renderBookingsTable(filter = 'all', query = '') {
