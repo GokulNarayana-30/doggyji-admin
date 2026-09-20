@@ -284,220 +284,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // ── 3. STATE STORE & SEED DATA ───────────────────────────────────────────────
-  
-  let providers = [
-    {
-      id: 'SP-10482',
-      fullName: 'Vikram Dogra',
-      city: 'Bengaluru',
-      area: 'Indiranagar',
-      services: ['Dog Walker', 'Daycare'],
-      experienceYears: 4,
-      quizPassed: true,
-      policeVerified: true,
-      status: 'pending',
-      submittedDate: '20 Sep 2026',
-      bio: 'Certified canine handler with 4 years experience caring for Indie and Labrador breeds.',
-      aadhaarLast4: '8492'
-    },
-    {
-      id: 'SP-10483',
-      fullName: 'Anjali Rao',
-      city: 'Hyderabad',
-      area: 'Banjara Hills',
-      services: ['Home Boarding'],
-      experienceYears: 6,
-      quizPassed: true,
-      policeVerified: false,
-      status: 'pending',
-      submittedDate: '20 Sep 2026',
-      bio: 'Lifelong pet foster parent with a spacious bungalow and safe fenced yard.',
-      aadhaarLast4: '3910'
-    },
-    {
-      id: 'SP-10484',
-      fullName: 'Rohit Sharma',
-      city: 'Mumbai',
-      area: 'Bandra West',
-      services: ['Dog Walker'],
-      experienceYears: 2,
-      quizPassed: true,
-      policeVerified: true,
-      status: 'pending',
-      submittedDate: '19 Sep 2026',
-      bio: 'Active runner and dog lover providing structured high-energy walks.',
-      aadhaarLast4: '7123'
-    },
-    {
-      id: 'SP-10485',
-      fullName: 'Sneha Kapoor',
-      city: 'Delhi NCR',
-      area: 'Vasant Kunj',
-      services: ['Daycare', 'Dog Walker'],
-      experienceYears: 3,
-      quizPassed: true,
-      policeVerified: false,
-      status: 'changes_requested',
-      submittedDate: '18 Sep 2026',
-      bio: 'Professional pet sitter with canine CPR certification.',
-      aadhaarLast4: '5541'
-    },
-    {
-      id: 'SP-10486',
-      fullName: 'Rajesh Nair',
-      city: 'Chennai',
-      area: 'Anna Nagar',
-      services: ['Dog Walker'],
-      experienceYears: 5,
-      quizPassed: true,
-      policeVerified: true,
-      status: 'approved',
-      submittedDate: '15 Sep 2026',
-      bio: 'Verified experienced professional walker with 100+ five star reviews.',
-      aadhaarLast4: '9921'
-    },
-    {
-      id: 'SP-10487',
-      fullName: 'Kavita Mehta',
-      city: 'Bengaluru',
-      area: 'Whitefield',
-      services: ['Home Boarding'],
-      experienceYears: 1,
-      quizPassed: false,
-      policeVerified: false,
-      status: 'suspended',
-      submittedDate: '10 Sep 2026',
-      bio: 'Account under operational suspension due to schedule cancellation dispute.',
-      aadhaarLast4: '2033'
-    }
-  ];
+  // ── 3. STATE STORE (LIVE SUPABASE MIRROR) ──────────────────────────────────
+  let providers = [];
+  let bookings = [];
+  let bloodRequests = [];
+  let donors = [];
+  let employees = [];
+  let auditLogs = [];
 
-  let bookings = [
-    {
-      id: 'BK-8891',
-      customerName: 'Rahul M.',
-      petName: 'Bruno (Golden Retriever)',
-      providerName: 'Rajesh Nair',
-      serviceType: 'Dog Walker',
-      date: '2026-09-21',
-      slot: '07:00 AM - 08:00 AM',
-      totalPrice: '₹350.00',
-      status: 'pending'
-    },
-    {
-      id: 'BK-8892',
-      customerName: 'Priya S.',
-      petName: 'Luna (Indie)',
-      providerName: 'Vikram Dogra',
-      serviceType: 'Daycare',
-      date: '2026-09-22',
-      slot: '09:00 AM - 05:00 PM',
-      totalPrice: '₹800.00',
-      status: 'confirmed'
-    },
-    {
-      id: 'BK-8893',
-      customerName: 'Sneha G.',
-      petName: 'Simba (Beagle)',
-      providerName: 'Anjali Rao',
-      serviceType: 'Home Boarding',
-      date: '2026-09-25',
-      slot: 'Overnight Boarding',
-      totalPrice: '₹1,500.00',
-      status: 'confirmed'
-    },
-    {
-      id: 'BK-8894',
-      customerName: 'Amit T.',
-      petName: 'Bella (Shih Tzu)',
-      providerName: 'Rajesh Nair',
-      serviceType: 'Dog Walker',
-      date: '2026-09-19',
-      slot: '05:00 PM - 06:00 PM',
-      totalPrice: '₹350.00',
-      status: 'completed'
-    }
-  ];
-
-  let bloodRequests = [
-    {
-      id: 'SOS-901',
-      petName: 'Rocky',
-      species: 'Dog (Labrador)',
-      bloodGroup: 'DEA 1.1+',
-      hospitalName: 'Cessna Lifeline Vet Hospital',
-      city: 'Bengaluru (Outer Ring Rd)',
-      urgencyLevel: 'CRITICAL',
-      status: 'active',
-      createdDate: '20 Sep 2026 15:30'
-    },
-    {
-      id: 'SOS-902',
-      petName: 'Coco',
-      species: 'Cat (Persian)',
-      bloodGroup: 'Type A',
-      hospitalName: 'VetVillage Animal Hospital',
-      city: 'Chennai (Anna Nagar)',
-      urgencyLevel: 'URGENT',
-      status: 'active',
-      createdDate: '20 Sep 2026 14:15'
-    }
-  ];
-
-  let donors = [
-    { name: 'Max (German Shepherd)', bloodGroup: 'DEA 1.1+', city: 'Bengaluru', distanceKm: '3.2 km', contact: '+91 98860-XXXXX' },
-    { name: 'Simba (Golden Retriever)', bloodGroup: 'DEA 1.1+', city: 'Bengaluru', distanceKm: '5.1 km', contact: '+91 98450-XXXXX' },
-    { name: 'Leo (Boxer)', bloodGroup: 'DEA 1.1-', city: 'Bengaluru', distanceKm: '7.8 km', contact: '+91 99000-XXXXX' }
-  ];
-
-  let employees = [
-    { empId: 'EMP-00001', name: 'Rahul V.', email: 'admin@doggyji.com', role: 'Super Administrator', status: 'Active', mfa: true, lastLogin: 'Just now' },
-    { empId: 'EMP-00027', name: 'Priya S.', email: 'priya.s@doggyji.com', role: 'Provider Verification Officer', status: 'Active', mfa: true, lastLogin: 'Today 11:20' },
-    { empId: 'EMP-00034', name: 'Arun K.', email: 'arun.k@doggyji.com', role: 'Operations Manager', status: 'Active', mfa: true, lastLogin: 'Today 09:45' },
-    { empId: 'EMP-00049', name: 'Ananya M.', email: 'ananya.m@doggyji.com', role: 'Customer Support Specialist', status: 'Active', mfa: false, lastLogin: 'Yesterday' },
-    { empId: 'EMP-00015', name: 'Dr. Vikram', email: 'vikram.v@doggyji.com', role: 'Blood SOS Coordinator', status: 'Active', mfa: true, lastLogin: 'Today 14:02' }
-  ];
-
-  // ── 4. IMMUTABLE AUDIT LOG SUBSYSTEM ─────────────────────────────────────────
-  let auditLogs = [
-    {
-      id: 'AUD-001',
-      eventName: 'provider.approved',
-      actor: { employee_id: 'EMP-00001', name: 'Rahul V.', role: 'Super Administrator', ip: '103.21.144.92' },
-      authorization: { permission_used: 'providers.approve', decision: 'allow' },
-      target: { type: 'service_providers', id: 'SP-10486', name: 'Rajesh Nair' },
-      change: { before: { verification_status: 'pending', is_verified: false }, after: { verification_status: 'approved', is_verified: true } },
-      context: { request_id: 'REQ-88A01', environment: 'production' },
-      business: { reason_code: 'all_checks_verified', reason_text: 'Complete identity & police checks verified' },
-      result: 'SUCCESS',
-      timestamp: '20 Sep 2026 16:18:42 IST'
-    },
-    {
-      id: 'AUD-002',
-      eventName: 'provider.document.viewed',
-      actor: { employee_id: 'EMP-00027', name: 'Priya S.', role: 'Provider Verification Officer', ip: '103.21.144.95' },
-      authorization: { permission_used: 'providers.documents.view', decision: 'allow' },
-      target: { type: 'provider_documents', id: 'DOC-9921', name: 'Aadhaar Card' },
-      change: { before: null, after: null },
-      context: { request_id: 'REQ-88A02', environment: 'production' },
-      business: { reason_code: 'verification_review', reason_text: 'Reviewing identity document authenticity' },
-      result: 'SUCCESS',
-      timestamp: '20 Sep 2026 16:15:10 IST'
-    },
-    {
-      id: 'AUD-003',
-      eventName: 'booking.cancelled',
-      actor: { employee_id: 'EMP-00034', name: 'Arun K.', role: 'Operations Manager', ip: '49.37.112.44' },
-      authorization: { permission_used: 'bookings.manage', decision: 'allow' },
-      target: { type: 'service_bookings', id: 'BK-8890', name: 'Daycare Booking' },
-      change: { before: { status: 'confirmed' }, after: { status: 'cancelled' } },
-      context: { request_id: 'REQ-7C4D9', environment: 'production' },
-      business: { reason_code: 'customer_emergency', reason_text: 'Pet hospitalization requested emergency cancellation' },
-      result: 'SUCCESS',
-      timestamp: '20 Sep 2026 14:02:11 IST'
-    }
-  ];
 
   function emitAuditEvent({ eventName, targetType, targetId, targetName, beforeState, afterState, reasonCode, reasonNotes, result = 'SUCCESS' }) {
     const reqId = 'REQ-' + Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -576,77 +370,96 @@ document.addEventListener('DOMContentLoaded', () => {
       // 1. Fetch live service_providers
       const { data: provData, error: provError } = await supabaseClient
         .from('service_providers')
-        .select('*');
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!provError && provData && provData.length > 0) {
-        const liveList = provData.map(p => ({
+      if (!provError && provData) {
+        providers = provData.map(p => ({
           id: p.id,
           fullName: p.full_name || 'Provider',
           city: p.city || 'Bengaluru',
           area: p.area || 'Central',
           services: p.service_types && p.service_types.length ? p.service_types : ['Dog Walker'],
-          experienceYears: p.years_experience || 2,
+          experienceYears: p.years_experience || 0,
           quizPassed: p.safety_quiz_passed || false,
           policeVerified: p.police_verified || false,
           status: p.verification_status || 'pending',
           submittedDate: new Date(p.created_at || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-          bio: p.bio || 'Verified pet care professional',
+          bio: p.bio || 'Pet care professional',
           aadhaarLast4: 'XXXX'
         }));
-        providers = liveList;
         renderProvidersTable();
       }
 
       // 2. Fetch live service_bookings
       const { data: bkData, error: bkError } = await supabaseClient
         .from('service_bookings')
-        .select('*');
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!bkError && bkData && bkData.length > 0) {
-        const liveBookings = bkData.map(b => ({
+      if (!bkError && bkData) {
+        bookings = bkData.map(b => ({
           id: b.id,
-          customerName: `Customer (${b.customer_id.substring(0, 6)}...)`,
+          customerName: `Customer (${(b.customer_id || '').substring(0, 8)}...)`,
           petName: 'Registered Pet',
-          providerName: 'Assigned Provider',
-          serviceType: b.service_type,
-          date: b.booking_date,
-          slot: b.time_slot,
+          providerName: b.provider_id ? `Provider (${b.provider_id.substring(0, 8)}...)` : 'Assigned Provider',
+          serviceType: b.service_type || 'Pet Care',
+          date: b.booking_date || 'Today',
+          slot: b.time_slot || 'Standard',
           totalPrice: `₹${b.total_price || '0.00'}`,
-          status: b.status
+          status: b.status || 'pending'
         }));
-        bookings = liveBookings;
         renderBookingsTable();
       }
 
       // 3. Fetch live blood_requests
       const { data: bloodData, error: bloodError } = await supabaseClient
         .from('blood_requests')
-        .select('*');
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!bloodError && bloodData && bloodData.length > 0) {
-        const liveRequests = bloodData.map(r => ({
+      if (!bloodError && bloodData) {
+        bloodRequests = bloodData.map(r => ({
           id: r.id,
-          petName: r.pet_name,
-          species: r.species,
-          bloodGroup: r.blood_group,
-          hospitalName: r.hospital_name,
-          city: r.hospital_city,
+          petName: r.pet_name || 'Emergency Pet',
+          species: r.species || 'Canine',
+          bloodGroup: r.blood_group || 'DEA 1.1+',
+          hospitalName: r.hospital_name || 'Veterinary Clinic',
+          city: r.hospital_city || 'Bengaluru',
           urgencyLevel: (r.urgency_level || 'critical').toUpperCase(),
-          status: r.status,
+          status: r.status || 'active',
           createdDate: new Date(r.created_at || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
         }));
-        bloodRequests = liveRequests;
         renderBloodRequestsTable();
       }
 
-      // 4. Fetch live audit logs
+      // 4. Fetch live admin staff (admin_users)
+      const { data: staffData, error: staffError } = await supabaseClient
+        .from('admin_users')
+        .select('*')
+        .order('created_at', { ascending: true });
+
+      if (!staffError && staffData) {
+        employees = staffData.map(s => ({
+          empId: s.employee_id || 'EMP-00001',
+          name: s.full_name || 'Staff Member',
+          email: s.email || 'staff@doggyji.com',
+          role: (s.role_id || 'super_admin').replace(/_/g, ' ').toUpperCase(),
+          status: (s.status || 'active').toUpperCase(),
+          mfa: s.mfa_enabled !== false,
+          lastLogin: s.last_login_at ? new Date(s.last_login_at).toLocaleString('en-GB') : 'Active Session'
+        }));
+        renderEmployeesTable();
+      }
+
+      // 5. Fetch live audit logs
       const { data: auditData, error: auditError } = await supabaseClient
         .from('admin_audit_logs')
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (!auditError && auditData && auditData.length > 0) {
-        const liveAudit = auditData.map(a => ({
+      if (!auditError && auditData) {
+        auditLogs = auditData.map(a => ({
           id: a.id.substring(0, 8),
           eventName: a.event_name,
           actor: a.actor || {},
@@ -658,8 +471,22 @@ document.addEventListener('DOMContentLoaded', () => {
           result: a.result || 'SUCCESS',
           timestamp: new Date(a.created_at).toLocaleString('en-GB') + ' IST'
         }));
-        auditLogs = liveAudit;
         renderAuditTable();
+      }
+
+      // 6. Fetch live blood donors
+      const { data: donorData, error: donorError } = await supabaseClient
+        .from('blood_donors')
+        .select('*');
+
+      if (!donorError && donorData) {
+        donors = donorData.map(d => ({
+          name: `${d.pet_name || 'Donor Pet'} (${d.breed || d.species || 'Canine'})`,
+          bloodGroup: d.blood_group,
+          city: d.city,
+          distanceKm: 'Nearby',
+          contact: d.emergency_contact || '+91 98XXX-XXXXX'
+        }));
       }
 
       if (connEl) {
@@ -811,6 +638,11 @@ document.addEventListener('DOMContentLoaded', () => {
       list = list.filter(b => b.customerName.toLowerCase().includes(q) || b.providerName.toLowerCase().includes(q) || b.id.toLowerCase().includes(q));
     }
 
+    if (list.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">📅</div><strong>No service bookings recorded in Supabase database yet.</strong><br><small>Bookings made via the mobile app will appear here in real-time.</small></td></tr>`;
+      return;
+    }
+
     tbody.innerHTML = list.map(b => {
       let statusBadge = '';
       if (b.status === 'confirmed') statusBadge = '<span class="badge-status badge-approved">Confirmed</span>';
@@ -839,6 +671,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const tbody = document.getElementById('bloodRequestsTableBody');
     if (!tbody) return;
 
+    if (bloodRequests.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">🚨</div><strong>No emergency blood requests in Supabase database.</strong><br><small>Emergency SOS alerts created from the app will stream here.</small></td></tr>`;
+      return;
+    }
+
     tbody.innerHTML = bloodRequests.map(r => `
       <tr>
         <td><strong>${r.petName}</strong><br><small style="color:var(--text-muted)">${r.species}</small></td>
@@ -858,6 +695,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderEmployeesTable() {
     const tbody = document.getElementById('employeesTableBody');
     if (!tbody) return;
+
+    if (employees.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">👥</div><strong>No administrative staff accounts found in Supabase.</strong></td></tr>`;
+      return;
+    }
 
     tbody.innerHTML = employees.map(e => `
       <tr>
@@ -891,6 +733,11 @@ document.addEventListener('DOMContentLoaded', () => {
       list = list.filter(a => a.eventName.toLowerCase().includes(q) || 
                               (a.actor && a.actor.name && a.actor.name.toLowerCase().includes(q)) || 
                               (a.context && a.context.request_id && a.context.request_id.toLowerCase().includes(q)));
+    }
+
+    if (list.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">📜</div><strong>No audit log entries recorded in Supabase database yet.</strong><br><small>Administrative and security actions will append immutable ledger rows here.</small></td></tr>`;
+      return;
     }
 
     tbody.innerHTML = list.map(a => {
@@ -934,6 +781,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (elAudit) elAudit.textContent = auditLogs.length;
     const elStaff = document.getElementById('dashStaffCount');
     if (elStaff) elStaff.textContent = employees.length;
+
+    // Sidebar counter badges
+    const badgePending = document.getElementById('pendingProvidersCount');
+    if (badgePending) badgePending.textContent = pending;
+    const badgeBk = document.getElementById('activeBookingsCount');
+    if (badgeBk) badgeBk.textContent = activeBk;
+    const badgeSos = document.getElementById('activeBloodSosCount');
+    if (badgeSos) badgeSos.textContent = activeSos;
   }
 
   // ── 7. CHARTS INITIALIZATION ────────────────────────────────────────────────
@@ -1545,7 +1400,11 @@ document.addEventListener('DOMContentLoaded', () => {
   updateDashboardMetrics();
   initCharts();
 
+  // Pull live records from Supabase tables immediately
+  fetchLiveSupabaseData();
+
   // Check auth session
   checkExistingSession();
+
 
 });
