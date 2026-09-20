@@ -391,24 +391,71 @@ document.addEventListener('DOMContentLoaded', () => {
         renderProvidersTable();
       }
 
-      // 2. Fetch live service_bookings
+      // 2. Fetch live service_bookings with joined customer profile & provider name
       const { data: bkData, error: bkError } = await supabaseClient
         .from('service_bookings')
-        .select('*')
+        .select(`
+          id,
+          customer_id,
+          provider_id,
+          service_type,
+          booking_date,
+          time_slot,
+          total_price,
+          status,
+          pet_id,
+          created_at,
+          service_providers!provider_id ( full_name )
+        `)
         .order('created_at', { ascending: false });
 
       if (!bkError && bkData) {
-        bookings = bkData.map(b => ({
-          id: b.id,
-          customerName: `Customer (${(b.customer_id || '').substring(0, 8)}...)`,
-          petName: 'Registered Pet',
-          providerName: b.provider_id ? `Provider (${b.provider_id.substring(0, 8)}...)` : 'Assigned Provider',
-          serviceType: b.service_type || 'Pet Care',
-          date: b.booking_date || 'Today',
-          slot: b.time_slot || 'Standard',
-          totalPrice: `₹${b.total_price || '0.00'}`,
-          status: b.status || 'pending'
-        }));
+        // Also fetch customer display names from profiles
+        const customerIds = [...new Set(bkData.map(b => b.customer_id).filter(Boolean))];
+        let profileMap = {};
+        if (customerIds.length) {
+          const { data: profileData } = await supabaseClient
+            .from('profiles')
+            .select('id, full_name, display_name')
+            .in('id', customerIds);
+          if (profileData) {
+            profileData.forEach(p => {
+              profileMap[p.id] = p.full_name || p.display_name || null;
+            });
+          }
+        }
+
+        // Also fetch pet names for bookings that have a pet_id
+        const petIds = [...new Set(bkData.map(b => b.pet_id).filter(Boolean))];
+        let petMap = {};
+        if (petIds.length) {
+          const { data: petsData } = await supabaseClient
+            .from('pets')
+            .select('id, name')
+            .in('id', petIds);
+          if (petsData) {
+            petsData.forEach(p => { petMap[p.id] = p.name; });
+          }
+        }
+
+        bookings = bkData.map(b => {
+          const customerName = profileMap[b.customer_id]
+            || (b.customer_id ? `ID: ${b.customer_id.substring(0, 8)}…` : 'Unknown Customer');
+          const providerName = b.service_providers?.full_name
+            || (b.provider_id ? `ID: ${b.provider_id.substring(0, 8)}…` : 'Unassigned');
+          const petName = b.pet_id ? (petMap[b.pet_id] || `Pet ${b.pet_id.substring(0, 6)}`) : '—';
+          return {
+            id: b.id,
+            customerName,
+            petName,
+            providerName,
+            serviceType: b.service_type || 'Pet Care',
+            date: b.booking_date || 'Today',
+            slot: b.time_slot || 'Standard',
+            totalPrice: `₹${b.total_price || '0.00'}`,
+            status: b.status || 'pending'
+          };
+        });
         renderBookingsTable();
       }
 
@@ -474,18 +521,19 @@ document.addEventListener('DOMContentLoaded', () => {
         renderAuditTable();
       }
 
-      // 6. Fetch live blood donors
+      // 6. Fetch live blood donors — join with pets table for real pet name & breed
       const { data: donorData, error: donorError } = await supabaseClient
         .from('blood_donors')
-        .select('*');
+        .select('*, pets ( name, breed, species )');
 
       if (!donorError && donorData) {
         donors = donorData.map(d => ({
-          name: `${d.pet_name || 'Donor Pet'} (${d.breed || d.species || 'Canine'})`,
+          name: d.pets?.name || `Donor (${d.id?.substring(0, 6)}…)`,
+          breed: d.pets?.breed || d.pets?.species || d.species || 'Canine',
           bloodGroup: d.blood_group,
           city: d.city,
           distanceKm: 'Nearby',
-          contact: d.emergency_contact || '+91 98XXX-XXXXX'
+          contact: d.emergency_contact || '—'
         }));
       }
 
