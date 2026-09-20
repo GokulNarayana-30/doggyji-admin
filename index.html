@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DoggyJi Admin & Enterprise Operations Portal</title>
+  
+  <!-- DoggyJi Brand Fonts (Nunito + Montserrat) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Chart.js for High-Fidelity Analytics -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <!-- Supabase JS Client for Live Database Integration -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Admin Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Ambient Security Glow Backdrops -->
+  <div class="ambient-glow glow-teal"></div>
+  <div class="ambient-glow glow-purple"></div>
+  <div class="ambient-glow glow-amber"></div>
+
+  <!-- ── 0. LOGIN SCREEN (UNAUTHENTICATED VIEW) ───────────────────────────────── -->
+  <div class="login-screen-wrapper" id="loginScreen">
+    <div class="login-card glass-card">
+      <div class="login-brand-header">
+        <div class="brand-badge-icon lg">🐶</div>
+        <h2>DoggyJi Staff Portal</h2>
+        <p class="login-subtitle">Internal Administration & Operations Platform</p>
+        <div class="login-security-tag">
+          <span>🔒 Zero-Trust RBAC & Immutable Audit Active</span>
+        </div>
+      </div>
+
+      <form id="loginForm" class="login-form">
+        <div class="form-group">
+          <label for="loginEmail">Staff Email Address</label>
+          <input type="email" id="loginEmail" class="input-text" placeholder="name@doggyji.com" required value="admin@doggyji.com">
+        </div>
+
+        <div class="form-group">
+          <div class="label-row">
+            <label for="loginPassword">Password</label>
+            <span class="forgot-pass-hint">Use staff password</span>
+          </div>
+          <div class="password-input-wrap">
+            <input type="password" id="loginPassword" class="input-text" placeholder="••••••••••••" required value="DoggyJi@2026!">
+            <button type="button" class="btn-toggle-pwd" id="togglePasswordBtn" title="Show/Hide Password">👁️</button>
+          </div>
+        </div>
+
+        <div class="login-options-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="rememberMe" checked>
+            <span>Keep session active</span>
+          </label>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block btn-lg" id="loginSubmitBtn">
+          <span>Sign In to Admin Portal →</span>
+        </button>
+      </form>
+
+      <div class="quick-personas-section">
+        <span class="quick-title">⚡ Quick Staff Persona Login:</span>
+        <div class="quick-persona-buttons">
+          <button type="button" class="btn-quick-persona" data-email="admin@doggyji.com" data-role="super_admin">
+            👑 Super Admin (Rahul V.)
+          </button>
+          <button type="button" class="btn-quick-persona" data-email="priya.s@doggyji.com" data-role="verification_officer">
+            🛡️ Verification (Priya S.)
+          </button>
+          <button type="button" class="btn-quick-persona" data-email="arun.k@doggyji.com" data-role="operations_manager">
+            💼 Operations (Arun K.)
+          </button>
+          <button type="button" class="btn-quick-persona" data-email="ananya.m@doggyji.com" data-role="support_agent">
+            🎧 Support (Ananya M.)
+          </button>
+        </div>
+      </div>
+
+      <div class="login-footer">
+        <small>Unauthorized access is strictly prohibited and permanently recorded in the immutable audit trail.</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 1. MAIN AUTHENTICATED PORTAL CONTAINER ──────────────────────────────── -->
+  <div class="admin-layout" id="adminAppLayout" style="display: none;">
+    
+    <!-- ── Sidebar Navigation ────────────────────────────────────────────────── -->
+    <aside class="admin-sidebar" id="adminSidebar">
+      <div class="sidebar-brand">
+        <div class="brand-badge-icon">🐶</div>
+        <div class="brand-text">
+          <span class="brand-name">DoggyJi</span>
+          <span class="brand-sub">Admin Operations</span>
+        </div>
+      </div>
+
+      <div class="current-role-indicator">
+        <div class="role-badge-pulse" id="rolePulse"></div>
+        <div class="role-meta">
+          <span class="role-title" id="activeRoleName">Super Administrator</span>
+          <span class="role-emp-id" id="activeEmpId">EMP-00001 • All Privileges</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-menu">
+        <div class="menu-section-label">CORE COMMAND</div>
+        <a href="#dashboard" class="nav-item active" data-view="dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Command Center</span>
+        </a>
+        <a href="#providers" class="nav-item" data-view="providers">
+          <span class="nav-icon">🛡️</span>
+          <span class="nav-label">Provider Verification</span>
+          <span class="badge-count" id="pendingProvidersCount">3</span>
+        </a>
+        <a href="#bookings" class="nav-item" data-view="bookings">
+          <span class="nav-icon">📅</span>
+          <span class="nav-label">Bookings & Overrides</span>
+          <span class="badge-count count-blue" id="activeBookingsCount">4</span>
+        </a>
+        <a href="#blood-sos" class="nav-item" data-view="blood-sos">
+          <span class="nav-icon">🚨</span>
+          <span class="nav-label">Blood SOS Dispatch</span>
+          <span class="badge-count count-red" id="activeBloodSosCount">2</span>
+        </a>
+
+        <div class="menu-section-label">GOVERNANCE & SECURITY</div>
+        <a href="#employees" class="nav-item" data-view="employees">
+          <span class="nav-icon">👥</span>
+          <span class="nav-label">Staff & RBAC Roles</span>
+        </a>
+        <a href="#audit-logs" class="nav-item" data-view="audit-logs">
+          <span class="nav-icon">📜</span>
+          <span class="nav-label">Immutable Audit Logs</span>
+          <span class="badge-status-pill">Append-Only</span>
+        </a>
+        <a href="#security" class="nav-item" data-view="security">
+          <span class="nav-icon">🔒</span>
+          <span class="nav-label">Security & Anomalies</span>
+          <span class="badge-count count-amber" id="securityAlertsCount">1</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="spec-version-badge">
+          <span>V2.0 RBAC Audit Ready</span>
+          <small>PostgreSQL & Firebase</small>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main Content Area ────────────────────────────────────────────────── -->
+    <main class="admin-main">
+      
+      <!-- Top App Bar -->
+      <header class="admin-header">
+        <div class="header-left">
+          <button class="mobile-toggle-btn" id="mobileMenuBtn" aria-label="Toggle Menu">☰</button>
+          <div class="page-title-box">
+            <h1 class="page-main-title" id="pageTitle">Command Center</h1>
+            <p class="page-subtitle" id="pageSubtitle">Real-time platform operations and security telemetry</p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <!-- Role Persona Switcher for Verification Testing -->
+          <div class="role-switcher-box">
+            <label for="roleSelector" class="switcher-label">🎭 Active Staff Persona:</label>
+            <select id="roleSelector" class="role-select">
+              <option value="super_admin">Super Admin (Rahul V. - EMP-00001)</option>
+              <option value="verification_officer">Verification Officer (Priya S. - EMP-00027)</option>
+              <option value="operations_manager">Operations Manager (Arun K. - EMP-00034)</option>
+              <option value="support_agent">Support Agent (Ananya M. - EMP-00049)</option>
+              <option value="blood_sos_manager">Blood SOS Coordinator (Dr. Vikram - EMP-00015)</option>
+            </select>
+          </div>
+
+          <!-- Theme Toggle Button -->
+          <button class="action-icon-btn" id="themeToggleBtn" title="Toggle Light/Dark Theme">
+            <span id="themeIcon">☀️</span>
+          </button>
+
+          <!-- Supabase Live Connection Status Pill -->
+          <div class="connection-pill" id="connStatus" title="Supabase Database Connection">
+            <div class="conn-dot online"></div>
+            <span>Backend Active</span>
+          </div>
+
+          <!-- Backend Config Modal Trigger -->
+          <button class="action-icon-btn" id="openBackendConfigBtn" title="Supabase & DB Settings">⚙️</button>
+
+          <!-- Sign Out Button -->
+          <button class="btn btn-sm btn-outline" id="signOutBtn" title="Sign Out of Session">🚪 Sign Out</button>
+        </div>
+      </header>
+
+      <!-- Dynamic Content Views Container -->
+      <div class="content-viewport">
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             1. COMMAND CENTER (DASHBOARD)
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view active" id="view-dashboard">
+          
+          <!-- Key Metric Stats Grid -->
+          <div class="metrics-grid">
+            <div class="metric-card card-teal">
+              <div class="metric-icon-wrap">🛡️</div>
+              <div class="metric-info">
+                <span class="metric-label">Approved Providers</span>
+                <span class="metric-value" id="dashApprovedProviders">18</span>
+                <span class="metric-delta delta-pos">↑ 100% verified KYC</span>
+              </div>
+            </div>
+
+            <div class="metric-card card-purple">
+              <div class="metric-icon-wrap">⏳</div>
+              <div class="metric-info">
+                <span class="metric-label">Pending Verifications</span>
+                <span class="metric-value" id="dashPendingProviders">3</span>
+                <span class="metric-delta delta-warn">Needs Review Queue</span>
+              </div>
+            </div>
+
+            <div class="metric-card card-blue">
+              <div class="metric-icon-wrap">📅</div>
+              <div class="metric-info">
+                <span class="metric-label">Active Bookings</span>
+                <span class="metric-value" id="dashActiveBookings">4</span>
+                <span class="metric-delta delta-pos">Supabase synchronized</span>
+              </div>
+            </div>
+
+            <div class="metric-card card-red">
+              <div class="metric-icon-wrap">🩸</div>
+              <div class="metric-info">
+                <span class="metric-label">Active Blood SOS</span>
+                <span class="metric-value" id="dashActiveSos">2</span>
+                <span class="metric-delta delta-crit">Emergency triage</span>
+              </div>
+            </div>
+
+            <div class="metric-card card-amber">
+              <div class="metric-icon-wrap">📜</div>
+              <div class="metric-info">
+                <span class="metric-label">Audit Logs Today</span>
+                <span class="metric-value" id="dashAuditCount">42</span>
+                <span class="metric-delta delta-pos">100% Append-only</span>
+              </div>
+            </div>
+
+            <div class="metric-card card-green">
+              <div class="metric-icon-wrap">👥</div>
+              <div class="metric-info">
+                <span class="metric-label">Active Staff</span>
+                <span class="metric-value" id="dashStaffCount">5</span>
+                <span class="metric-delta delta-pos">RBAC enforced</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Charts Row -->
+          <div class="dashboard-charts-grid">
+            <div class="glass-card chart-card">
+              <div class="card-header-clean">
+                <h3>Verification & Ops Velocity</h3>
+                <span class="card-subtitle">Last 7 Days Operational Activity</span>
+              </div>
+              <div class="chart-canvas-wrap">
+                <canvas id="opsVelocityChart"></canvas>
+              </div>
+            </div>
+
+            <div class="glass-card chart-card">
+              <div class="card-header-clean">
+                <h3>Audit Events Distribution</h3>
+                <span class="card-subtitle">Breakdown by Module</span>
+              </div>
+              <div class="chart-canvas-wrap">
+                <canvas id="auditDistributionChart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Security Banner -->
+          <div class="security-banner-callout">
+            <div class="banner-icon">🔒</div>
+            <div class="banner-text">
+              <h4>Zero-Trust Authorization & Immutability Active</h4>
+              <p>Every admin action verifies permissions server-side and writes an immutable audit record with actor ID, timestamp, and JSON before/after state diff. Local bypasses are disabled.</p>
+            </div>
+            <button class="btn btn-outline" onclick="navigateTo('audit-logs')">View Audit Stream →</button>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             2. PROVIDER VERIFICATION QUEUE
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-providers">
+          <div class="section-toolbar">
+            <div class="filter-pills" id="providerFilterPills">
+              <button class="filter-pill active" data-filter="all">All Applications (21)</button>
+              <button class="filter-pill" data-filter="pending">Pending Review (3)</button>
+              <button class="filter-pill" data-filter="changes_requested">Changes Requested (1)</button>
+              <button class="filter-pill" data-filter="approved">Approved (16)</button>
+              <button class="filter-pill" data-filter="suspended">Suspended (1)</button>
+            </div>
+
+            <div class="search-and-actions">
+              <input type="text" class="input-search" id="providerSearchInput" placeholder="Search provider, city, or ID...">
+              <button class="btn btn-sm btn-primary" id="btnSyncLiveSupabase" title="Fetch live rows directly from Supabase">🔄 Live DB Sync</button>
+              <button class="btn btn-sm btn-outline" id="btnSeedLiveSupabase" title="Insert real pending applicants into Supabase">🌱 Populate Test Rows in DB</button>
+            </div>
+          </div>
+
+          <!-- Providers Table Card -->
+          <div class="glass-card table-card">
+            <div class="table-responsive">
+              <table class="data-table" id="providersTable">
+                <thead>
+                  <tr>
+                    <th>Provider Name & ID</th>
+                    <th>City & Services</th>
+                    <th>Experience</th>
+                    <th>Verification Badges</th>
+                    <th>Status</th>
+                    <th>Submitted Date</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="providersTableBody">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             3. BOOKINGS & OPERATIONS OVERRIDES
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-bookings">
+          <div class="section-toolbar">
+            <div class="filter-pills" id="bookingFilterPills">
+              <button class="filter-pill active" data-filter="all">All Bookings</button>
+              <button class="filter-pill" data-filter="pending">Pending</button>
+              <button class="filter-pill" data-filter="confirmed">Confirmed</button>
+              <button class="filter-pill" data-filter="completed">Completed</button>
+              <button class="filter-pill" data-filter="cancelled">Cancelled</button>
+            </div>
+
+            <div class="search-and-actions">
+              <input type="text" class="input-search" id="bookingSearchInput" placeholder="Search by customer, provider, slot...">
+            </div>
+          </div>
+
+          <div class="glass-card table-card">
+            <div class="table-responsive">
+              <table class="data-table" id="bookingsTable">
+                <thead>
+                  <tr>
+                    <th>Booking ID</th>
+                    <th>Customer</th>
+                    <th>Provider</th>
+                    <th>Service Type</th>
+                    <th>Date & Slot</th>
+                    <th>Total Price</th>
+                    <th>Status</th>
+                    <th>Operations Action</th>
+                  </tr>
+                </thead>
+                <tbody id="bookingsTableBody">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             4. BLOOD SOS DISPATCH CENTER
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-blood-sos">
+          <div class="sos-banner-alert">
+            <div class="sos-icon-pulse">🩸</div>
+            <div class="sos-banner-content">
+              <h3>Emergency Blood Bank SOS Command</h3>
+              <p>Direct coordination center for critical veterinary transfusions. Contact info is strictly protected under P0-09 privacy controls.</p>
+            </div>
+          </div>
+
+          <div class="glass-card table-card">
+            <div class="card-header-clean">
+              <h3>Active Emergency Transfusion Requests</h3>
+              <span class="card-subtitle">Real-time requests needing donor dispatch</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table" id="bloodRequestsTable">
+                <thead>
+                  <tr>
+                    <th>Pet Name & Species</th>
+                    <th>Blood Group</th>
+                    <th>Hospital Name</th>
+                    <th>Location</th>
+                    <th>Urgency Level</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Dispatch Action</th>
+                  </tr>
+                </thead>
+                <tbody id="bloodRequestsTableBody">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             5. STAFF DIRECTORY & RBAC PERMISSIONS
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-employees">
+          <div class="section-toolbar">
+            <div>
+              <h3>Staff Directory & RBAC Roles</h3>
+              <p class="section-desc">Manage internal employees and assign role-based permissions</p>
+            </div>
+            <button class="btn btn-primary" id="addEmployeeBtn">+ Invite Employee</button>
+          </div>
+
+          <div class="glass-card table-card">
+            <div class="table-responsive">
+              <table class="data-table" id="employeesTable">
+                <thead>
+                  <tr>
+                    <th>Employee ID</th>
+                    <th>Full Name</th>
+                    <th>Email</th>
+                    <th>Assigned Role</th>
+                    <th>Status</th>
+                    <th>MFA Enabled</th>
+                    <th>Last Active</th>
+                    <th>Manage</th>
+                  </tr>
+                </thead>
+                <tbody id="employeesTableBody">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Role Permissions Reference Card -->
+          <div class="glass-card mt-24">
+            <div class="card-header-clean">
+              <h3>System Role Permissions Matrix (V2 Specification)</h3>
+              <span class="card-subtitle">Hardened principle of least privilege</span>
+            </div>
+            <div class="roles-matrix-grid">
+              <div class="role-matrix-card">
+                <h4>👑 Super Administrator</h4>
+                <ul>
+                  <li>✓ Full system configuration</li>
+                  <li>✓ Invite/suspend staff & modify roles</li>
+                  <li>✓ Full provider approve/reject authority</li>
+                  <li>✓ Bookings and Blood SOS overrides</li>
+                  <li>✓ View and export immutable audit logs</li>
+                </ul>
+              </div>
+              <div class="role-matrix-card">
+                <h4>🛡️ Provider Verification Officer</h4>
+                <ul>
+                  <li>✓ View provider verification queue</li>
+                  <li>✓ Access sensitive KYC documents (Audited)</li>
+                  <li>✓ Approve / Reject / Request changes</li>
+                  <li>✗ Cannot manage staff or change system settings</li>
+                  <li>✗ Cannot export full audit logs</li>
+                </ul>
+              </div>
+              <div class="role-matrix-card">
+                <h4>💼 Operations Manager</h4>
+                <ul>
+                  <li>✓ Manage booking overrides & cancellations</li>
+                  <li>✓ Authorize payment refunds</li>
+                  <li>✓ Suspend non-compliant providers</li>
+                  <li>✓ Coordinate Blood SOS responses</li>
+                  <li>✗ Cannot modify employee permissions</li>
+                </ul>
+              </div>
+              <div class="role-matrix-card">
+                <h4>🎧 Customer Support Specialist</h4>
+                <ul>
+                  <li>✓ View booking and service inquiries</li>
+                  <li>✓ Cancel pending bookings on customer request</li>
+                  <li>✗ Cannot approve or reject providers</li>
+                  <li>✗ Cannot view raw KYC identity documents</li>
+                  <li>✗ Cannot access security logs</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             6. IMMUTABLE AUDIT LOG SUBSYSTEM
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-audit-logs">
+          <div class="audit-control-bar">
+            <div class="audit-filter-inputs">
+              <input type="text" class="input-search" id="auditSearchInput" placeholder="Search by Action, Request ID, Actor...">
+              
+              <select class="select-input" id="auditModuleFilter">
+                <option value="all">All Modules</option>
+                <option value="providers">Providers</option>
+                <option value="bookings">Bookings</option>
+                <option value="employees">Employees / RBAC</option>
+                <option value="blood_sos">Blood SOS</option>
+                <option value="security">Security & Auth</option>
+              </select>
+
+              <select class="select-input" id="auditResultFilter">
+                <option value="all">All Results</option>
+                <option value="SUCCESS">SUCCESS</option>
+                <option value="DENIED">DENIED</option>
+                <option value="FAILURE">FAILURE</option>
+              </select>
+            </div>
+
+            <div class="audit-actions">
+              <button class="btn btn-outline" id="exportAuditBtn">📥 Export Audit Logs (JSON)</button>
+            </div>
+          </div>
+
+          <div class="glass-card table-card">
+            <div class="table-responsive">
+              <table class="data-table" id="auditTable">
+                <thead>
+                  <tr>
+                    <th>Timestamp (IST)</th>
+                    <th>Actor (Staff ID)</th>
+                    <th>Action Event</th>
+                    <th>Module</th>
+                    <th>Target Record</th>
+                    <th>Result</th>
+                    <th>Request ID</th>
+                    <th>Inspect</th>
+                  </tr>
+                </thead>
+                <tbody id="auditTableBody">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════════════════════
+             7. SECURITY ANOMALIES & INCIDENTS
+             ══════════════════════════════════════════════════════════════════════ -->
+        <section class="content-view" id="view-security">
+          <div class="security-incidents-container">
+            <div class="glass-card mb-24">
+              <div class="card-header-clean">
+                <h3>Real-Time Security Anomaly Monitor</h3>
+                <span class="card-subtitle">Automated policy checks and anomaly detection signals</span>
+              </div>
+              <div class="incident-list" id="incidentList">
+                <!-- Injected via JavaScript -->
+              </div>
+            </div>
+
+            <div class="security-rules-card glass-card">
+              <div class="card-header-clean">
+                <h3>Mandatory Engineering Security Rules Active</h3>
+                <span class="card-subtitle">Enforced as per V2 RBAC Specification</span>
+              </div>
+              <div class="rules-checklist">
+                <div class="rule-item verified">
+                  <span class="check-icon">✓</span>
+                  <div>
+                    <strong>Rule 1 & 2: Server-Side Authorization Mandatory</strong>
+                    <p>UI buttons are not authorization mechanisms. Backend validates active status and permission token.</p>
+                  </div>
+                </div>
+                <div class="rule-item verified">
+                  <span class="check-icon">✓</span>
+                  <div>
+                    <strong>Rule 4: Audit Records are Strictly Append-Only</strong>
+                    <p>PostgreSQL trigger `trg_enforce_audit_immutability` blocks all UPDATE and DELETE commands.</p>
+                  </div>
+                </div>
+                <div class="rule-item verified">
+                  <span class="check-icon">✓</span>
+                  <div>
+                    <strong>Rule 5: Self-Privilege Escalation Strictly Blocked</strong>
+                    <p>Staff accounts cannot grant themselves elevated permissions or approve their own provider profile.</p>
+                  </div>
+                </div>
+                <div class="rule-item verified">
+                  <span class="check-icon">✓</span>
+                  <div>
+                    <strong>Rule 7: Sensitive Document Access Is Permissioned & Audited</strong>
+                    <p>Every view of Aadhaar or KYC documents emits a `provider.document.viewed` audit event.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- ── MODAL: Provider Document Review & Action Modal ──────────────────────── -->
+  <div class="modal-backdrop" id="providerReviewModal">
+    <div class="modal-dialog modal-large">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="reviewModalTitle">Review Provider Application</h2>
+          <p class="modal-subtitle" id="reviewModalSubtitle">ID: SP-10482 • Submitted on 20 Sep 2026</p>
+        </div>
+        <button class="modal-close-btn" onclick="closeModal('providerReviewModal')">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="review-grid">
+          <!-- Left Column: Provider & Documents Info -->
+          <div class="review-left">
+            <div class="detail-group">
+              <label>Applicant Name</label>
+              <div class="detail-value-bold" id="reviewFullName">Vikram Dogra</div>
+            </div>
+            <div class="detail-group">
+              <label>City & Service Area</label>
+              <div class="detail-value" id="reviewCityArea">Bengaluru, Indiranagar</div>
+            </div>
+            <div class="detail-group">
+              <label>Experience & Services</label>
+              <div class="detail-value" id="reviewServices">4 Years • Dog Walker, Daycare</div>
+            </div>
+            <div class="detail-group">
+              <label>Safety Quiz & Checks</label>
+              <div class="detail-value" id="reviewChecks">✓ Safety Quiz Passed (100%) • Police Certificate Attached</div>
+            </div>
+            <div class="detail-group">
+              <label>Applicant Bio</label>
+              <p class="detail-bio" id="reviewBio">Certified canine handler with 4 years experience caring for Indie and Labrador breeds.</p>
+            </div>
+
+            <!-- KYC Document View Box -->
+            <div class="kyc-doc-card">
+              <div class="kyc-header">
+                <span class="kyc-icon">📄</span>
+                <div>
+                  <strong>Government ID (Aadhaar Card)</strong>
+                  <span class="kyc-status">Encrypted in Private Storage</span>
+                </div>
+              </div>
+              <div class="kyc-preview-sim">
+                <div class="kyc-masked-doc">
+                  <div class="kyc-emblem">🇮🇳</div>
+                  <div class="kyc-lines">
+                    <span class="line-bold">GOVERNMENT OF INDIA</span>
+                    <span class="line-sub">Unique Identification Authority</span>
+                    <span class="line-aadhaar">XXXX XXXX 8492</span>
+                  </div>
+                </div>
+              </div>
+              <button class="btn btn-sm btn-outline mt-8" id="viewFullDocBtn" onclick="triggerDocumentViewAudit()">
+                👁️ View Decrypted Document (Logs Audit Event)
+              </button>
+            </div>
+          </div>
+
+          <!-- Right Column: Verification Decision Panel -->
+          <div class="review-right">
+            <h3>Verification Decision</h3>
+            <p class="text-muted">Select an action. All decisions are permanently recorded in the audit trail.</p>
+
+            <div class="form-group mt-16">
+              <label for="reviewReasonCode">Reason Code (Mandatory for Reject/Changes) *</label>
+              <select class="select-input" id="reviewReasonCode">
+                <option value="all_checks_verified">All Checks Verified & Satisfied</option>
+                <option value="document_mismatch">Document Name Mismatch</option>
+                <option value="blurry_kyc">Blurry / Illegible Document Image</option>
+                <option value="police_verification_missing">Police Verification Expired / Missing</option>
+                <option value="policy_violation">Safety Policy Violation</option>
+              </select>
+            </div>
+
+            <div class="form-group mt-12">
+              <label for="reviewNotes">Reviewer Notes (Recorded in Audit & Communication)</label>
+              <textarea class="textarea-input" id="reviewNotes" rows="4" placeholder="Enter notes justifying the decision..."></textarea>
+            </div>
+
+            <div class="decision-actions mt-20">
+              <button class="btn btn-success" id="btnApproveProvider">✓ Approve Provider</button>
+              <button class="btn btn-warning" id="btnRequestChangesProvider">⚠️ Request Changes</button>
+              <button class="btn btn-danger" id="btnRejectProvider">✕ Reject Application</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MODAL: Booking Override & Cancellation Modal ────────────────────────── -->
+  <div class="modal-backdrop" id="bookingActionModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title">Booking Operations Action</h2>
+          <p class="modal-subtitle" id="bookingModalSubtitle">Booking #BK-8891</p>
+        </div>
+        <button class="modal-close-btn" onclick="closeModal('bookingActionModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p>You are about to perform an administrative override on this booking.</p>
+        <div class="form-group mt-16">
+          <label>Action to Execute</label>
+          <select class="select-input" id="bookingActionSelect">
+            <option value="admin_cancel">Cancel Booking (Customer Protection)</option>
+            <option value="admin_confirm">Emergency Confirm</option>
+            <option value="admin_refund">Issue Immediate Full Refund</option>
+          </select>
+        </div>
+        <div class="form-group mt-12">
+          <label>Mandatory Administrative Reason *</label>
+          <input type="text" class="input-text" id="bookingActionReason" placeholder="e.g. Customer emergency cancellation, weather hazard...">
+        </div>
+        <div class="modal-footer mt-20">
+          <button class="btn btn-outline" onclick="closeModal('bookingActionModal')">Cancel</button>
+          <button class="btn btn-primary" id="btnExecuteBookingAction">Execute Override</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MODAL: Blood SOS Dispatch Modal ────────────────────────────────────── -->
+  <div class="modal-backdrop" id="bloodDispatchModal">
+    <div class="modal-dialog modal-large">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title">Emergency Blood SOS Dispatcher</h2>
+          <p class="modal-subtitle" id="bloodModalSubtitle">Urgent Transfusion Request</p>
+        </div>
+        <button class="modal-close-btn" onclick="closeModal('bloodDispatchModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="sos-dispatch-grid">
+          <div class="sos-patient-box">
+            <h4>Patient Details</h4>
+            <div id="sosPatientInfo">Loading patient data...</div>
+          </div>
+          <div class="sos-candidates-box">
+            <h4>Compatible Registered Donors</h4>
+            <div class="donor-candidates-list" id="donorCandidatesList">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer mt-20">
+          <button class="btn btn-outline" onclick="closeModal('bloodDispatchModal')">Close</button>
+          <button class="btn btn-danger" id="btnBroadcastSosAlert">🚨 Dispatch Urgent FCM Broadcast to Donors</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DRAWER: Audit Event Deep Inspection Drawer ─────────────────────────── -->
+  <div class="drawer-backdrop" id="auditInspectDrawer">
+    <div class="drawer-panel">
+      <div class="drawer-header">
+        <div>
+          <h3 class="drawer-title" id="drawerEventName">provider.approved</h3>
+          <span class="drawer-subtitle" id="drawerEventTimestamp">20 Sep 2026 16:18:42 IST</span>
+        </div>
+        <button class="modal-close-btn" onclick="closeDrawer('auditInspectDrawer')">✕</button>
+      </div>
+
+      <div class="drawer-body">
+        <div class="drawer-section">
+          <h4>Actor Information</h4>
+          <div class="meta-row"><span>Employee:</span><strong id="drawerActorName">Rahul Kumar (EMP-00027)</strong></div>
+          <div class="meta-row"><span>Role:</span><span id="drawerActorRole">Provider Verification Officer</span></div>
+          <div class="meta-row"><span>IP Address:</span><code id="drawerActorIp">103.21.144.92</code></div>
+          <div class="meta-row"><span>Authorization Used:</span><code id="drawerPermissionUsed">providers.approve</code></div>
+        </div>
+
+        <div class="drawer-section">
+          <h4>Target & Context</h4>
+          <div class="meta-row"><span>Target Entity:</span><strong id="drawerTargetEntity">service_providers</strong></div>
+          <div class="meta-row"><span>Target ID:</span><code id="drawerTargetId">SP-10482</code></div>
+          <div class="meta-row"><span>Correlation Request ID:</span><code id="drawerRequestId">REQ-7F4C2</code></div>
+          <div class="meta-row"><span>Result:</span><span class="badge-status-pill badge-approved" id="drawerResult">SUCCESS</span></div>
+        </div>
+
+        <div class="drawer-section">
+          <h4>Business Reason & Notes</h4>
+          <div class="meta-row"><span>Reason Code:</span><span id="drawerReasonCode">all_checks_verified</span></div>
+          <p class="drawer-notes" id="drawerNotes">"Identity verified via official Aadhaar card, safety quiz passed with score 100%, clean background report."</p>
+        </div>
+
+        <div class="drawer-section">
+          <h4>Authoritative State Diff (Before & After)</h4>
+          <div class="diff-view-box">
+            <div class="diff-col">
+              <span class="diff-title-red">- BEFORE</span>
+              <pre class="json-code" id="drawerBeforeJson">{ "verification_status": "pending", "is_verified": false }</pre>
+            </div>
+            <div class="diff-col">
+              <span class="diff-title-green">+ AFTER</span>
+              <pre class="json-code" id="drawerAfterJson">{ "verification_status": "approved", "is_verified": true }</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MODAL: Supabase Live Backend Configuration ───────────────────────── -->
+  <div class="modal-backdrop" id="backendConfigModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title">Live Supabase Database Settings</h2>
+          <p class="modal-subtitle">Direct PostgreSQL & REST API Connection</p>
+        </div>
+        <button class="modal-close-btn" onclick="closeModal('backendConfigModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:12px; color:var(--text-secondary); margin-bottom:16px;">
+          Connects the Admin Portal directly to your DoggyJi Supabase database for live provider verification, booking management, and audit log persistence.
+        </p>
+
+        <div class="form-group">
+          <label for="cfgSupabaseUrl">Supabase Project URL</label>
+          <input type="text" class="input-text" id="cfgSupabaseUrl" value="https://iythfpzwxrbvxfmutxai.supabase.co">
+        </div>
+
+        <div class="form-group">
+          <label for="cfgSupabaseAnon">Publishable Anon Key</label>
+          <input type="text" class="input-text" id="cfgSupabaseAnon" value="sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt">
+        </div>
+
+        <div class="form-group">
+          <label for="cfgSupabaseServiceRole">Service Role Secret Key (Optional - for Admin RLS Bypass)</label>
+          <input type="password" class="input-text" id="cfgSupabaseServiceRole" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+          <small style="color:var(--text-muted); display:block; margin-top:4px;">
+            Enables direct database mutations if strict RLS blocks anonymous updates. Kept strictly in browser memory.
+          </small>
+        </div>
+
+        <div class="modal-footer mt-20" style="display:flex; justify-content:space-between; align-items:center;">
+          <button class="btn btn-sm btn-outline" id="btnTestDbConnection">⚡ Test Connection</button>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-outline" onclick="closeModal('backendConfigModal')">Cancel</button>
+            <button class="btn btn-primary" id="btnSaveBackendConfig">Save & Reconnect</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Main JavaScript App Logic -->
+  <script src="app.js"></script>
+</body>
+</html>
