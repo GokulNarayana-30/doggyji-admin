@@ -40,7 +40,7 @@
       <form id="loginForm" class="login-form">
         <div class="form-group">
           <label for="loginEmail">Staff Email Address</label>
-          <input type="email" id="loginEmail" class="input-text" placeholder="name@doggyji.com" required value="admin@doggyji.com">
+          <input type="email" id="loginEmail" class="input-text" placeholder="name@doggyji.com" required autocomplete="username">
         </div>
 
         <div class="form-group">
@@ -49,7 +49,7 @@
             <span class="forgot-pass-hint">Use staff password</span>
           </div>
           <div class="password-input-wrap">
-            <input type="password" id="loginPassword" class="input-text" placeholder="••••••••••••" required value="DoggyJi@2026!">
+            <input type="password" id="loginPassword" class="input-text" placeholder="Your staff password" required autocomplete="current-password">
             <button type="button" class="btn-toggle-pwd" id="togglePasswordBtn" title="Show/Hide Password">👁️</button>
           </div>
         </div>
@@ -65,24 +65,6 @@
           <span>Sign In to Admin Portal →</span>
         </button>
       </form>
-
-      <div class="quick-personas-section">
-        <span class="quick-title">⚡ Quick Staff Persona Login:</span>
-        <div class="quick-persona-buttons">
-          <button type="button" class="btn-quick-persona" data-email="admin@doggyji.com" data-role="super_admin">
-            👑 Super Admin (Rahul V.)
-          </button>
-          <button type="button" class="btn-quick-persona" data-email="priya.s@doggyji.com" data-role="verification_officer">
-            🛡️ Verification (Priya S.)
-          </button>
-          <button type="button" class="btn-quick-persona" data-email="arun.k@doggyji.com" data-role="operations_manager">
-            💼 Operations (Arun K.)
-          </button>
-          <button type="button" class="btn-quick-persona" data-email="ananya.m@doggyji.com" data-role="support_agent">
-            🎧 Support (Ananya M.)
-          </button>
-        </div>
-      </div>
 
       <div class="login-footer">
         <small>Unauthorized access is strictly prohibited and permanently recorded in the immutable audit trail.</small>
@@ -107,7 +89,7 @@
         <div class="role-badge-pulse" id="rolePulse"></div>
         <div class="role-meta">
           <span class="role-title" id="activeRoleName">Super Administrator</span>
-          <span class="role-emp-id" id="activeEmpId">EMP-00001 • All Privileges</span>
+          <span class="role-emp-id" id="activeEmpId"></span>
         </div>
       </div>
 
@@ -172,16 +154,14 @@
         </div>
 
         <div class="header-actions">
-          <!-- Role Persona Switcher for Verification Testing -->
+          <!-- Signed-in role. Read-only: this was a "persona" dropdown that
+               re-established the session with whichever role was picked, so
+               anyone could promote themselves to Super Admin from the UI. The
+               role now comes from admin_users and is enforced by admin_has()
+               in the database, so there is nothing here to choose. -->
           <div class="role-switcher-box">
-            <label for="roleSelector" class="switcher-label">🎭 Active Staff Persona:</label>
-            <select id="roleSelector" class="role-select">
-              <option value="super_admin">Super Admin (Rahul V. - EMP-00001)</option>
-              <option value="verification_officer">Verification Officer (Priya S. - EMP-00027)</option>
-              <option value="operations_manager">Operations Manager (Arun K. - EMP-00034)</option>
-              <option value="support_agent">Support Agent (Ananya M. - EMP-00049)</option>
-              <option value="blood_sos_manager">Blood SOS Coordinator (Dr. Vikram - EMP-00015)</option>
-            </select>
+            <span class="switcher-label">Signed in as</span>
+            <span id="activeRoleBadge" class="role-badge">—</span>
           </div>
 
           <!-- Theme Toggle Button -->
@@ -851,14 +831,6 @@
         <div class="form-group">
           <label for="cfgSupabaseAnon">Publishable Anon Key</label>
           <input type="text" class="input-text" id="cfgSupabaseAnon" value="sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt">
-        </div>
-
-        <div class="form-group">
-          <label for="cfgSupabaseServiceRole">Service Role Secret Key (Optional - for Admin RLS Bypass)</label>
-          <input type="password" class="input-text" id="cfgSupabaseServiceRole" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
-          <small style="color:var(--text-muted); display:block; margin-top:4px;">
-            Enables direct database mutations if strict RLS blocks anonymous updates. Kept strictly in browser memory.
-          </small>
         </div>
 
         <div class="modal-footer mt-20" style="display:flex; justify-content:space-between; align-items:center;">

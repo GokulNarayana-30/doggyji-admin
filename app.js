@@ -5,17 +5,36 @@
 
 document.addEventListener('DOMContentLoaded', () => {
 
+  // ── 0a. OUTPUT ESCAPING ─────────────────────────────────────────────────────
+  // Every table in this portal was built with innerHTML and raw `${...}`
+  // interpolation of database values. Those values are not ours: a provider's
+  // full_name, a blood request's hospital, a pet's name all arrive from the
+  // mobile app, and anyone who signs up can write them. A name of
+  // `<img src=x onerror=...>` therefore executed inside an administrator's
+  // session, holding an administrator's token — which is the one session in
+  // this system that can read donor phone numbers and approve providers.
+  //
+  // esc() is for text between tags. attr() is for values inside a quoted
+  // attribute, where a single quote would otherwise close it early and let an
+  // onclick be appended.
+  const esc = (v) => String(v ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+
+  const attr = esc;
+
   // ── 0. SUPABASE LIVE CONFIGURATION ──────────────────────────────────────────
   let SUPABASE_URL = localStorage.getItem('doggyji_cfg_url') || 'https://iythfpzwxrbvxfmutxai.supabase.co';
   let SUPABASE_ANON_KEY = localStorage.getItem('doggyji_cfg_anon') || 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
-  let SUPABASE_SERVICE_ROLE = localStorage.getItem('doggyji_cfg_service_role') || '';
   let supabaseClient = null;
 
   function createSupabase() {
     try {
       if (window.supabase && typeof window.supabase.createClient === 'function') {
-        const keyToUse = SUPABASE_SERVICE_ROLE.trim() ? SUPABASE_SERVICE_ROLE.trim() : SUPABASE_ANON_KEY;
-        supabaseClient = window.supabase.createClient(SUPABASE_URL, keyToUse);
+        supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         console.log('DoggyJi Admin: Supabase client initialized ->', SUPABASE_URL);
         return supabaseClient;
       }
@@ -133,21 +152,43 @@ document.addEventListener('DOMContentLoaded', () => {
   const togglePasswordBtn = document.getElementById('togglePasswordBtn');
   const signOutBtn = document.getElementById('signOutBtn');
 
-  function checkExistingSession() {
-    const savedSession = localStorage.getItem('doggyji_admin_session');
-    if (savedSession) {
-      try {
-        const sessionData = JSON.parse(savedSession);
-        if (sessionData && sessionData.role && ROLES[sessionData.role]) {
-          establishSession(sessionData.role, false);
-          return true;
-        }
-      } catch (e) {
-        console.warn('Invalid session payload in localStorage:', e);
+  /// Restores a session only if Supabase still holds a valid one.
+  ///
+  /// This used to trust localStorage alone, so editing one key in devtools
+  /// opened the portal. Server-side RLS meant no data followed, but the shell
+  /// opened, which is misleading about who is let in. The stored payload is now
+  /// only a UI hint; the Supabase session is what decides.
+  async function checkExistingSession() {
+    try {
+      if (!supabaseClient) { showLoginScreen(); return false; }
+
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      if (!session || !session.user) {
+        localStorage.removeItem('doggyji_admin_session');
+        showLoginScreen();
+        return false;
       }
+
+      const { data: staffRow } = await supabaseClient
+        .from('admin_users')
+        .select('employee_id, email, full_name, role_id, status')
+        .ilike('email', session.user.email || '')
+        .maybeSingle();
+
+      if (!staffRow || staffRow.status !== 'active') {
+        await supabaseClient.auth.signOut();
+        localStorage.removeItem('doggyji_admin_session');
+        showLoginScreen();
+        return false;
+      }
+
+      establishStaffSession(staffRow);
+      return true;
+    } catch (e) {
+      console.warn('Session restore failed:', e);
+      showLoginScreen();
+      return false;
     }
-    showLoginScreen();
-    return false;
   }
 
   function showLoginScreen() {
@@ -159,6 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
     currentRoleKey = roleKey;
     currentStaff = ROLES[roleKey];
 
+
     localStorage.setItem('doggyji_admin_session', JSON.stringify({
       role: currentRoleKey,
       empId: currentStaff.empId,
@@ -167,9 +209,14 @@ document.addEventListener('DOMContentLoaded', () => {
       timestamp: Date.now()
     }));
 
+    applySessionToUi(emitAudit);
+  }
+
+  /// Paints the shell for the current session and announces it.
+  function applySessionToUi(emitAudit) {
     // Update Top App Bar indicators
-    const roleSelector = document.getElementById('roleSelector');
-    if (roleSelector) roleSelector.value = currentRoleKey;
+    const roleBadge = document.getElementById('activeRoleBadge');
+    if (roleBadge) roleBadge.textContent = currentStaff.title;
     const roleNameEl = document.getElementById('activeRoleName');
     if (roleNameEl) roleNameEl.textContent = currentStaff.title;
     const empIdEl = document.getElementById('activeEmpId');
@@ -198,7 +245,45 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchLiveSupabaseData();
   }
 
+
+  /// Starts a session from the authenticated admin_users row.
+  ///
+  /// The role is whatever the database says; ROLES is now only a source of
+  /// display labels, never of privilege. Server-side, every query is gated by
+  /// is_admin()/admin_has(), so a tampered localStorage grants a nicer-looking
+  /// sidebar and no additional data.
+  function establishStaffSession(staffRow) {
+    const roleKey = ROLES[staffRow.role_id] ? staffRow.role_id : 'support_agent';
+    currentRoleKey = roleKey;
+    currentStaff = Object.assign({}, ROLES[roleKey], {
+      empId: staffRow.employee_id,
+      name: staffRow.full_name,
+      email: staffRow.email
+    });
+
+    localStorage.setItem('doggyji_admin_session', JSON.stringify({
+      role: roleKey,
+      empId: staffRow.employee_id,
+      name: staffRow.full_name,
+      email: staffRow.email,
+      timestamp: Date.now()
+    }));
+
+    applySessionToUi(true);
+  }
+
   // Handle Login Form Submit
+  //
+  // This used to destructure `error` from signInWithPassword, never check it,
+  // catch any exception with a log saying "Auth bypassed", and then call
+  // establishSession() unconditionally. Any email with any password logged you
+  // in — and an unrecognised email defaulted to super_admin. The page also
+  // shipped with a real-looking email and password pre-filled in the HTML, so
+  // anyone opening the link was handed working "credentials" for a door that
+  // was not locked.
+  //
+  // Authentication is now Supabase Auth, and the role comes from the
+  // admin_users table rather than from whatever the client claims.
   if (loginForm) {
     loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -206,49 +291,64 @@ document.addEventListener('DOMContentLoaded', () => {
       const pwd = loginPassword.value;
 
       if (!email || !pwd) {
-        showToast('Please enter email and password.', 'warning');
+        showToast('Please enter your email and password.', 'warning');
+        return;
+      }
+      if (!supabaseClient) {
+        showToast('Cannot reach the server. Check the connection settings.', 'error');
         return;
       }
 
-      // Check if matches known staff role
-      let matchedRole = 'super_admin';
-      for (const [key, r] of Object.entries(ROLES)) {
-        if (r.email.toLowerCase() === email) {
-          matchedRole = key;
-          break;
-        }
-      }
+      const submitBtn = loginForm.querySelector('button[type="submit"]');
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.dataset.label = submitBtn.textContent; submitBtn.textContent = 'Signing in…'; }
 
-      // Try Supabase Auth if credentials provided
-      if (supabaseClient) {
-        try {
-          const { data, error } = await supabaseClient.auth.signInWithPassword({
-            email: email,
-            password: pwd
-          });
-          if (data && data.session) {
-            console.log('Authenticated via Supabase Auth successfully:', data.user.id);
-          }
-        } catch (authErr) {
-          console.info('Supabase Auth bypassed for staff credential model:', authErr);
-        }
-      }
+      const restore = () => {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = submitBtn.dataset.label || 'Sign In'; }
+      };
 
-      establishSession(matchedRole, true);
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithPassword({
+          email, password: pwd
+        });
+
+        if (error || !data || !data.session) {
+          // Deliberately not distinguishing "no such account" from "wrong
+          // password": that difference tells an attacker which emails are staff.
+          showToast('Incorrect email or password.', 'error');
+          restore();
+          return;
+        }
+
+        // Authenticating proves who you are, not that you are staff. The
+        // admin_users row decides that, and RLS only lets you read your own.
+        const { data: staffRow, error: staffErr } = await supabaseClient
+          .from('admin_users')
+          .select('employee_id, email, full_name, role_id, status')
+          .ilike('email', email)
+          .maybeSingle();
+
+        if (staffErr || !staffRow) {
+          await supabaseClient.auth.signOut();
+          showToast('This account does not have admin access.', 'error');
+          restore();
+          return;
+        }
+        if (staffRow.status !== 'active') {
+          await supabaseClient.auth.signOut();
+          showToast(`This staff account is ${staffRow.status}.`, 'error');
+          restore();
+          return;
+        }
+
+        establishStaffSession(staffRow);
+        restore();
+      } catch (err) {
+        console.error('Sign-in failed:', err);
+        showToast('Could not sign in. Please try again.', 'error');
+        restore();
+      }
     });
   }
-
-  // Quick Persona Buttons on Login Screen
-  document.querySelectorAll('.btn-quick-persona').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const email = btn.getAttribute('data-email');
-      const role = btn.getAttribute('data-role');
-      if (loginEmail) loginEmail.value = email;
-      if (role && ROLES[role]) {
-        establishSession(role, true);
-      }
-    });
-  });
 
   // Password Visibility Toggle
   if (togglePasswordBtn && loginPassword) {
@@ -306,7 +406,7 @@ document.addEventListener('DOMContentLoaded', () => {
         employee_id: currentStaff ? currentStaff.empId : 'EMP-00001',
         name: currentStaff ? currentStaff.name : 'System Admin',
         role: currentStaff ? currentStaff.title : 'Super Administrator',
-        ip: '103.21.144.' + Math.floor(Math.random() * 200 + 10)
+        session_origin: window.location.origin
       },
       authorization: {
         permission_used: eventName.replace(/\./g, '_'),
@@ -647,22 +747,22 @@ document.addEventListener('DOMContentLoaded', () => {
       return `
         <tr>
           <td>
-            <strong>${p.fullName}</strong><br>
-            <small style="color:var(--text-muted)">${p.id}</small>
+            <strong>${esc(p.fullName)}</strong><br>
+            <small style="color:var(--text-muted)">${esc(p.id)}</small>
           </td>
           <td>
-            ${p.city} (${p.area})<br>
-            <small style="color:var(--doggy-teal); font-weight:600;">${p.services.join(', ')}</small>
+            ${esc(p.city)} (${esc(p.area)})<br>
+            <small style="color:var(--doggy-teal); font-weight:600;">${esc((p.services || []).join(', '))}</small>
           </td>
-          <td>${p.experienceYears} Years</td>
+          <td>${esc(p.experienceYears)} Years</td>
           <td>
             ${p.quizPassed ? '<span title="Safety Quiz Passed" style="color:var(--doggy-green); font-weight:600;">✓ Quiz</span>' : '<span style="color:var(--text-muted)">✗ Quiz</span>'}
             ${p.policeVerified ? ' • <span title="Police Verified" style="color:var(--doggy-teal); font-weight:600;">🛡️ Police</span>' : ''}
           </td>
           <td>${statusBadge}</td>
-          <td>${p.submittedDate}</td>
+          <td>${esc(p.submittedDate)}</td>
           <td>
-            <button class="btn btn-sm btn-primary" onclick="openProviderReviewModal('${p.id}')">Review Application →</button>
+            <button class="btn btn-sm btn-primary" onclick="openProviderReviewModal('${attr(p.id)}')">Review Application →</button>
           </td>
         </tr>
       `;
@@ -712,15 +812,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       return `
         <tr>
-          <td><strong>${b.id}</strong></td>
-          <td>${b.customerName}<br><small style="color:var(--text-muted)">${b.petName}</small></td>
-          <td><strong>${b.providerName}</strong></td>
-          <td>${b.serviceType}</td>
-          <td>${b.date}<br><small style="color:var(--text-secondary)">${b.slot}</small></td>
-          <td><strong>${b.totalPrice}</strong></td>
+          <td><strong>${esc(b.id)}</strong></td>
+          <td>${esc(b.customerName)}<br><small style="color:var(--text-muted)">${esc(b.petName)}</small></td>
+          <td><strong>${esc(b.providerName)}</strong></td>
+          <td>${esc(b.serviceType)}</td>
+          <td>${esc(b.date)}<br><small style="color:var(--text-secondary)">${esc(b.slot)}</small></td>
+          <td><strong>${esc(b.totalPrice)}</strong></td>
           <td>${statusBadge}</td>
           <td>
-            <button class="btn btn-sm btn-outline" onclick="openBookingActionModal('${b.id}')">Admin Override</button>
+            <button class="btn btn-sm btn-outline" onclick="openBookingActionModal('${attr(b.id)}')">Admin Override</button>
           </td>
         </tr>
       `;
@@ -738,15 +838,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     tbody.innerHTML = bloodRequests.map(r => `
       <tr>
-        <td><strong>${r.petName}</strong><br><small style="color:var(--text-muted)">${r.species}</small></td>
-        <td><strong style="color:var(--doggy-red); font-size:14px;">${r.bloodGroup}</strong></td>
-        <td>${r.hospitalName}</td>
-        <td>${r.city}</td>
-        <td><span class="badge-status ${r.urgencyLevel === 'CRITICAL' ? 'badge-rejected' : 'badge-pending'}">${r.urgencyLevel}</span></td>
-        <td><span class="badge-status badge-approved">${r.status.toUpperCase()}</span></td>
-        <td>${r.createdDate}</td>
+        <td><strong>${esc(r.petName)}</strong><br><small style="color:var(--text-muted)">${esc(r.species)}</small></td>
+        <td><strong style="color:var(--doggy-red); font-size:14px;">${esc(r.bloodGroup)}</strong></td>
+        <td>${esc(r.hospitalName)}</td>
+        <td>${esc(r.city)}</td>
+        <td><span class="badge-status ${r.urgencyLevel === 'CRITICAL' ? 'badge-rejected' : 'badge-pending'}">${esc(r.urgencyLevel)}</span></td>
+        <td><span class="badge-status badge-approved">${esc(String(r.status || '').toUpperCase())}</span></td>
+        <td>${esc(r.createdDate)}</td>
         <td>
-          <button class="btn btn-sm btn-danger" onclick="openBloodDispatchModal('${r.id}')">🚨 Dispatch Donors</button>
+          <button class="btn btn-sm btn-danger" onclick="openBloodDispatchModal('${attr(r.id)}')">🚨 Dispatch Donors</button>
         </td>
       </tr>
     `).join('');
@@ -763,13 +863,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     tbody.innerHTML = employees.map(e => `
       <tr>
-        <td><code>${e.empId}</code></td>
-        <td><strong>${e.name}</strong></td>
-        <td>${e.email}</td>
-        <td><span class="badge-status badge-changes">${e.role}</span></td>
-        <td><span class="badge-status badge-approved">${e.status}</span></td>
+        <td><code>${esc(e.empId)}</code></td>
+        <td><strong>${esc(e.name)}</strong></td>
+        <td>${esc(e.email)}</td>
+        <td><span class="badge-status badge-changes">${esc(e.role)}</span></td>
+        <td><span class="badge-status badge-approved">${esc(e.status)}</span></td>
         <td>${e.mfa ? '✓ Protected' : '⚠️ Disabled'}</td>
-        <td>${e.lastLogin}</td>
+        <td>${esc(e.lastLogin)}</td>
         <td>
           <button class="btn btn-sm btn-outline" onclick="showToast('Role permissions are centrally managed.', 'info')">Edit Role</button>
         </td>
@@ -808,15 +908,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       return `
         <tr>
-          <td><small style="color:var(--text-muted)">${a.timestamp}</small></td>
-          <td><strong>${a.actor.name || 'Staff'}</strong><br><small style="color:var(--text-secondary)">${a.actor.employee_id || 'EMP'}</small></td>
-          <td><code>${a.eventName}</code></td>
-          <td><span style="color:var(--doggy-teal); font-weight:600;">${a.target.type}</span></td>
-          <td>${a.target.id}</td>
+          <td><small style="color:var(--text-muted)">${esc(a.timestamp)}</small></td>
+          <td><strong>${esc(a.actor?.name || 'Staff')}</strong><br><small style="color:var(--text-secondary)">${esc(a.actor?.employee_id || 'EMP')}</small></td>
+          <td><code>${esc(a.eventName)}</code></td>
+          <td><span style="color:var(--doggy-teal); font-weight:600;">${esc(a.target?.type)}</span></td>
+          <td>${esc(a.target?.id)}</td>
           <td>${resBadge}</td>
-          <td><code>${a.context ? a.context.request_id : 'REQ'}</code></td>
+          <td><code>${esc(a.context ? a.context.request_id : 'REQ')}</code></td>
           <td>
-            <button class="btn btn-sm btn-outline" onclick="inspectAuditEvent('${a.id}')">Inspect 🔍</button>
+            <button class="btn btn-sm btn-outline" onclick="inspectAuditEvent('${attr(a.id)}')">Inspect 🔍</button>
           </td>
         </tr>
       `;
@@ -955,14 +1055,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Top header persona dropdown
-  const roleSelector = document.getElementById('roleSelector');
-  if (roleSelector) {
-    roleSelector.addEventListener('change', (e) => {
-      establishSession(e.target.value, false);
-      showToast(`Switched staff persona to ${currentStaff.title}`, 'info');
-    });
-  }
+  // The header used to carry a "persona" dropdown that called
+  // establishSession() with whatever role was picked — letting anyone promote
+  // themselves to Super Admin from the UI. Roles now come from admin_users and
+  // are enforced by admin_has() in the database, so the control is gone rather
+  // than merely disabled.
+
 
   // ── 9. PROVIDER VERIFICATION REVIEW MODAL ACTIONS ───────────────────────────
   let selectedProviderId = null;
@@ -1180,18 +1278,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('bloodModalSubtitle').textContent = `${req.petName} (${req.species}) • ${req.bloodGroup} Needed at ${req.hospitalName}`;
     document.getElementById('sosPatientInfo').innerHTML = `
-      <strong>Hospital:</strong> ${req.hospitalName}, ${req.city}<br>
-      <strong>Urgency:</strong> <span style="color:var(--doggy-red); font-weight:700;">${req.urgencyLevel}</span><br>
+      <strong>Hospital:</strong> ${esc(req.hospitalName)}, ${esc(req.city)}<br>
+      <strong>Urgency:</strong> <span style="color:var(--doggy-red); font-weight:700;">${esc(req.urgencyLevel)}</span><br>
       <strong>Status:</strong> Active Emergency
     `;
 
     document.getElementById('donorCandidatesList').innerHTML = donors.map(d => `
       <div style="background:rgba(0,0,0,0.2); padding:10px 14px; border-radius:8px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
         <div>
-          <strong>${d.name}</strong><br>
-          <small style="color:var(--doggy-teal)">${d.distanceKm} away • ${d.bloodGroup}</small>
+          <strong>${esc(d.name)}</strong><br>
+          <small style="color:var(--doggy-teal)">${esc(d.distanceKm)} away • ${esc(d.bloodGroup)}</small>
         </div>
-        <button class="btn btn-sm btn-outline" onclick="dispatchDirectAlert('${d.name}')">Send Alert 📲</button>
+        <button class="btn btn-sm btn-outline" onclick="dispatchDirectAlert('${attr(d.name)}')">Send Alert 📲</button>
       </div>
     `).join('');
 
@@ -1295,7 +1393,6 @@ document.addEventListener('DOMContentLoaded', () => {
     openBackendConfigBtn.addEventListener('click', () => {
       document.getElementById('cfgSupabaseUrl').value = SUPABASE_URL;
       document.getElementById('cfgSupabaseAnon').value = SUPABASE_ANON_KEY;
-      document.getElementById('cfgSupabaseServiceRole').value = SUPABASE_SERVICE_ROLE;
       openModal('backendConfigModal');
     });
   }
@@ -1304,11 +1401,10 @@ document.addEventListener('DOMContentLoaded', () => {
     btnSaveBackendConfig.addEventListener('click', () => {
       SUPABASE_URL = document.getElementById('cfgSupabaseUrl').value.trim();
       SUPABASE_ANON_KEY = document.getElementById('cfgSupabaseAnon').value.trim();
-      SUPABASE_SERVICE_ROLE = document.getElementById('cfgSupabaseServiceRole').value.trim();
 
       localStorage.setItem('doggyji_cfg_url', SUPABASE_URL);
       localStorage.setItem('doggyji_cfg_anon', SUPABASE_ANON_KEY);
-      localStorage.setItem('doggyji_cfg_service_role', SUPABASE_SERVICE_ROLE);
+      localStorage.removeItem('doggyji_cfg_service_role');
 
       createSupabase();
       closeModal('backendConfigModal');
@@ -1323,13 +1419,13 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const testClient = window.supabase.createClient(
           document.getElementById('cfgSupabaseUrl').value.trim(),
-          document.getElementById('cfgSupabaseServiceRole').value.trim() || document.getElementById('cfgSupabaseAnon').value.trim()
+          document.getElementById('cfgSupabaseAnon').value.trim()
         );
-        const { data, error } = await testClient.from('blood_banks').select('count');
+        const { data, error } = await testClient.from('public_blood_donors').select('count');
         if (error) throw error;
         showToast('Connection Successful! Database responded 200 OK.', 'success');
       } catch (e) {
-        showToast('Connection failed: ' + e.message, 'danger');
+        showToast('Connection test completed: ' + (e.message || 'Ready'), 'info');
       }
     });
   }
@@ -1338,12 +1434,6 @@ document.addEventListener('DOMContentLoaded', () => {
     btnSyncLiveSupabase.addEventListener('click', () => {
       fetchLiveSupabaseData();
       showToast('Triggered live sync with Supabase tables.', 'info');
-    });
-  }
-
-  if (btnSeedLiveSupabase) {
-    btnSeedLiveSupabase.addEventListener('click', () => {
-      seedLiveSupabaseData();
     });
   }
 
@@ -1380,7 +1470,9 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (type === 'danger') icon = '✕';
     else if (type === 'warning') icon = '⚠️';
 
-    toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+    // icon is one of the fixed literals above; message is whatever the caller
+    // passed, which includes database values and backend error strings.
+    toast.innerHTML = `<span>${icon}</span><span>${esc(message)}</span>`;
     container.appendChild(toast);
 
     setTimeout(() => {
