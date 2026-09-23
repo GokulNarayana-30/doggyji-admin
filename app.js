@@ -26,6 +26,69 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const attr = esc;
 
+  // ── 0c. PRIVILEGED WRITES ───────────────────────────────────────────────────
+  // Approving a provider or overriding a booking cannot be done from here.
+  // protect_service_provider_fields() and process_booking_lifecycle() permit
+  // only is_service_role(), and this page holds the publishable key, so its
+  // writes arrive as `authenticated` and the triggers raise. Every approve and
+  // reject has always failed at the database while the portal toasted success.
+  //
+  // The admin-action edge function holds the service-role key as a secret,
+  // re-checks the caller against admin_users and the permission the action
+  // needs, and writes the audit row itself.
+  async function callAdminAction(action, targetId, extra = {}) {
+    if (!supabaseClient) {
+      return { ok: false, error: 'Not connected to the backend.' };
+    }
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) return { ok: false, error: 'Your session has expired. Sign in again.' };
+
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/admin-action`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ action, targetId, ...extra }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { ok: false, error: body.reason || body.error || `Failed (${res.status})` };
+      }
+      return { ok: true, result: body.result };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  // ── 0b. EVENT DELEGATION FOR TABLE ROW ACTIONS ──────────────────────────────
+  // Row buttons used to carry onclick="fn('${attr(id)}')". Escaping is not
+  // enough there: an onclick attribute is parsed as HTML first and evaluated
+  // as JavaScript second, so &#39; is decoded back to a quote before the
+  // engine sees it. A pet name of  x');alert(1);//  therefore broke out of the
+  // string and ran in an administrator's session — and pet names come from
+  // anyone who can sign up.
+  //
+  // The id now travels as a data attribute, which is inert, and the handler is
+  // attached here rather than written into markup. esc() still applies, so the
+  // attribute itself cannot be broken out of either.
+  const ROW_ACTIONS = {
+    'review-provider': (id) => window.openProviderReviewModal(id),
+    'booking-override': (id) => window.openBookingActionModal(id),
+    'blood-dispatch': (id) => window.openBloodDispatchModal(id),
+    'inspect-audit': (id) => window.inspectAuditEvent(id),
+    'dispatch-donor': (id) => window.dispatchDirectAlert(id),
+  };
+
+  document.addEventListener('click', (event) => {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const handler = ROW_ACTIONS[el.dataset.action];
+    if (handler) handler(el.dataset.id);
+  });
+
   // ── 0. SUPABASE LIVE CONFIGURATION ──────────────────────────────────────────
   let SUPABASE_URL = localStorage.getItem('doggyji_cfg_url') || 'https://iythfpzwxrbvxfmutxai.supabase.co';
   let SUPABASE_ANON_KEY = localStorage.getItem('doggyji_cfg_anon') || 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
@@ -762,7 +825,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <td>${statusBadge}</td>
           <td>${esc(p.submittedDate)}</td>
           <td>
-            <button class="btn btn-sm btn-primary" onclick="openProviderReviewModal('${attr(p.id)}')">Review Application →</button>
+            <button class="btn btn-sm btn-primary" data-action="review-provider" data-id="${attr(p.id)}">Review Application →</button>
           </td>
         </tr>
       `;
@@ -820,7 +883,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <td><strong>${esc(b.totalPrice)}</strong></td>
           <td>${statusBadge}</td>
           <td>
-            <button class="btn btn-sm btn-outline" onclick="openBookingActionModal('${attr(b.id)}')">Admin Override</button>
+            <button class="btn btn-sm btn-outline" data-action="booking-override" data-id="${attr(b.id)}">Admin Override</button>
           </td>
         </tr>
       `;
@@ -846,7 +909,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <td><span class="badge-status badge-approved">${esc(String(r.status || '').toUpperCase())}</span></td>
         <td>${esc(r.createdDate)}</td>
         <td>
-          <button class="btn btn-sm btn-danger" onclick="openBloodDispatchModal('${attr(r.id)}')">🚨 Dispatch Donors</button>
+          <button class="btn btn-sm btn-danger" data-action="blood-dispatch" data-id="${attr(r.id)}">🚨 Dispatch Donors</button>
         </td>
       </tr>
     `).join('');
@@ -916,7 +979,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <td>${resBadge}</td>
           <td><code>${esc(a.context ? a.context.request_id : 'REQ')}</code></td>
           <td>
-            <button class="btn btn-sm btn-outline" onclick="inspectAuditEvent('${attr(a.id)}')">Inspect 🔍</button>
+            <button class="btn btn-sm btn-outline" data-action="inspect-audit" data-id="${attr(a.id)}">Inspect 🔍</button>
           </td>
         </tr>
       `;
@@ -1115,14 +1178,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const reasonCode = document.getElementById('reviewReasonCode').value;
     const notes = document.getElementById('reviewNotes').value || 'All safety and identity checks completed.';
 
-    // Live update on Supabase
-    if (supabaseClient) {
-      const { error } = await supabaseClient
-        .from('service_providers')
-        .update({ verification_status: 'approved', is_verified: true })
-        .eq('id', prov.id);
-
-      if (error) console.info('Notice updating live provider (check trigger/service role):', error.message);
+    const outcome = await callAdminAction('provider.approve', prov.id, { reason: notes });
+    if (!outcome.ok) {
+      // The local copy was optimistically flipped above; put it back.
+      prov.status = beforeState.verification_status;
+      showToast(`Could not approve ${prov.fullName}: ${outcome.error}`, 'error');
+      renderProvidersTable();
+      return;
     }
 
     emitAuditEvent({
@@ -1160,11 +1222,12 @@ document.addEventListener('DOMContentLoaded', () => {
     prov.status = 'rejected';
     const afterState = { verification_status: 'rejected' };
 
-    if (supabaseClient) {
-      await supabaseClient
-        .from('service_providers')
-        .update({ verification_status: 'rejected', is_verified: false })
-        .eq('id', prov.id);
+    const outcome = await callAdminAction('provider.reject', prov.id, { reason: notes });
+    if (!outcome.ok) {
+      prov.status = beforeState.verification_status;
+      showToast(`Could not reject ${prov.fullName}: ${outcome.error}`, 'error');
+      renderProvidersTable();
+      return;
     }
 
     emitAuditEvent({
@@ -1245,11 +1308,14 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (action === 'admin_confirm') bk.status = 'confirmed';
     const afterState = { status: bk.status };
 
-    if (supabaseClient) {
-      await supabaseClient
-        .from('service_bookings')
-        .update({ status: bk.status })
-        .eq('id', bk.id);
+    const outcome = await callAdminAction('booking.set_status', bk.id, {
+      status: bk.status,
+    });
+    if (!outcome.ok) {
+      bk.status = beforeState.status;
+      showToast(`Could not update the booking: ${outcome.error}`, 'error');
+      renderBookingsTable();
+      return;
     }
 
     emitAuditEvent({
@@ -1289,7 +1355,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <strong>${esc(d.name)}</strong><br>
           <small style="color:var(--doggy-teal)">${esc(d.distanceKm)} away • ${esc(d.bloodGroup)}</small>
         </div>
-        <button class="btn btn-sm btn-outline" onclick="dispatchDirectAlert('${attr(d.name)}')">Send Alert 📲</button>
+        <button class="btn btn-sm btn-outline" data-action="dispatch-donor" data-id="${attr(d.name)}">Send Alert 📲</button>
       </div>
     `).join('');
 
