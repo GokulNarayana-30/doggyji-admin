@@ -1,22 +1,48 @@
 /**
- * DoggyJi Admin Web Portal — Production Live Engine
- * Reference: DOGGYJI_ADMIN_RBAC_AUDIT_COMPLETE_V2.md
+ * DoggyJi Admin Portal.
+ *
+ * Plain script, no build step: index.html + style.css + this file are the
+ * whole site (published from the doggyji-admin repo to GitHub Pages and
+ * Netlify).
+ *
+ * Security model, in short:
+ *  - Sign-in is Supabase Auth. Being signed in proves who you are, not that
+ *    you are staff: the admin_users row linked to the login (auth_user_id)
+ *    decides that, and its role decides what you may do.
+ *  - Reads go straight to Supabase and are limited by row level security
+ *    (is_admin() / admin_has()), so hiding a menu item here is convenience,
+ *    not protection.
+ *  - Every write goes through the admin-action edge function, which checks
+ *    the permission again and writes the audit row itself.
+ *  - Everything from the database is escaped with esc() before it goes into
+ *    HTML: names, reasons and notes are typed by app users. Buttons carry ids
+ *    in data attributes and are wired by one delegated click handler; no
+ *    inline event handler is ever built from a value (see escaping_test.mjs).
  */
+'use strict';
 
-document.addEventListener('DOMContentLoaded', () => {
+(() => {
+  // ── Configuration ──────────────────────────────────────────────────────────
+  const SUPABASE_URL = 'https://iythfpzwxrbvxfmutxai.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
+  const LIST_LIMIT = 300;
 
-  // ── 0a. OUTPUT ESCAPING ─────────────────────────────────────────────────────
-  // Every table in this portal was built with innerHTML and raw `${...}`
-  // interpolation of database values. Those values are not ours: a provider's
-  // full_name, a blood request's hospital, a pet's name all arrive from the
-  // mobile app, and anyone who signs up can write them. A name of
-  // `<img src=x onerror=...>` therefore executed inside an administrator's
-  // session, holding an administrator's token — which is the one session in
-  // this system that can read donor phone numbers and approve providers.
-  //
-  // esc() is for text between tags. attr() is for values inside a quoted
-  // attribute, where a single quote would otherwise close it early and let an
-  // onclick be appended.
+  // An invite or password-reset link lands here with its type in the URL
+  // hash. Read it before the Supabase client consumes the hash.
+  const landingHash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const landingType = landingHash.get('type');
+  const landingError = landingHash.get('error_description');
+
+  if (!window.supabase || typeof window.supabase.createClient !== 'function') {
+    document.body.innerHTML = '<div class="state"><div class="ico">⚠️</div><h4>Could not load the admin portal</h4><p>A required script did not load. Check your connection and reload the page.</p></div>';
+    return;
+  }
+
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' },
+  });
+
+  // ── Small helpers ──────────────────────────────────────────────────────────
   const esc = (v) => String(v ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -24,1605 +50,1922 @@ document.addEventListener('DOMContentLoaded', () => {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-  const attr = esc;
+  const $ = (sel, root = document) => root.querySelector(sel);
 
-  // ── 0c. PRIVILEGED WRITES ───────────────────────────────────────────────────
-  // Approving a provider or overriding a booking cannot be done from here.
-  // protect_service_provider_fields() and process_booking_lifecycle() permit
-  // only is_service_role(), and this page holds the publishable key, so its
-  // writes arrive as `authenticated` and the triggers raise. Every approve and
-  // reject has always failed at the database while the portal toasted success.
-  //
-  // The admin-action edge function holds the service-role key as a secret,
-  // re-checks the caller against admin_users and the permission the action
-  // needs, and writes the audit row itself.
-  async function callAdminAction(action, targetId, extra = {}) {
-    if (!supabaseClient) {
-      return { ok: false, error: 'Not connected to the backend.' };
+  /** Only https links from the database are used as src / href. */
+  const safeUrl = (u) => (typeof u === 'string' && /^https:\/\//i.test(u) ? u : '');
+
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function fmtDate(v) {
+    if (!v) return '—';
+    const d = new Date(v);
+    if (isNaN(d)) return '—';
+    return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+  function fmtDateTime(v) {
+    if (!v) return '—';
+    const d = new Date(v);
+    if (isNaN(d)) return '—';
+    return `${fmtDate(d)}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function ago(v) {
+    if (!v) return '—';
+    const s = (Date.now() - new Date(v).getTime()) / 1000;
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    if (s < 86400 * 30) return `${Math.floor(s / 86400)} d ago`;
+    return fmtDate(v);
+  }
+  const money = (n) => (n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`);
+  const shortId = (id) => (id ? String(id).slice(0, 8) : '—');
+  const titleCase = (s) => String(s ?? '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const initials = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || '?';
+
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
+  function toast(message, kind = 'info') {
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.textContent = message;
+    $('#toasts').appendChild(el);
+    setTimeout(() => el.remove(), kind === 'error' ? 7000 : 4000);
+  }
+
+  /** Friendly text for a failed read. */
+  function readError(error) {
+    const msg = String(error?.message || error || '');
+    if (/permission|policy|42501/i.test(msg)) return 'Your role cannot see this.';
+    if (/fetch|network/i.test(msg)) return 'Could not reach the server. Check your connection.';
+    return 'Could not load this. Try again.';
+  }
+
+  /** Throws on a Supabase error, returns data otherwise. */
+  async function q(builder) {
+    const { data, error, count } = await builder;
+    if (error) throw error;
+    return count !== undefined && count !== null && data === null ? count : data;
+  }
+
+  async function countOf(table, apply = (b) => b) {
+    const { count, error } = await apply(sb.from(table).select('*', { count: 'exact', head: true }));
+    if (error) return null;
+    return count ?? 0;
+  }
+
+  const badge = (text, tone = 'slate') => `<span class="badge b-${tone}">${esc(text)}</span>`;
+
+  const STATUS_TONE = {
+    open: 'red', reviewing: 'amber', actioned: 'green', dismissed: 'slate',
+    pending: 'amber', approved: 'green', rejected: 'red', verified: 'green',
+    confirmed: 'blue', completed: 'green', cancelled: 'slate',
+    active: 'red', fulfilled: 'green', closed: 'slate', expired: 'slate',
+    contacted: 'blue', donor_declined: 'slate', unreachable: 'amber',
+    accepted: 'green', declined: 'slate',
+    suspended: 'red', disabled: 'slate',
+  };
+  const statusBadge = (s) => badge(titleCase(s || 'unknown'), STATUS_TONE[s] || 'slate');
+
+  function personCell(p, id, sub) {
+    const name = p?.full_name || (p?.username ? `@${p.username}` : null) ||
+      (id === 'deleted-user' ? 'Deleted account' : `User ${shortId(id)}`);
+    const img = safeUrl(p?.avatar_url);
+    const avatar = img
+      ? `<img class="avatar" src="${esc(img)}" alt="" loading="lazy">`
+      : `<span class="avatar">${esc(initials(name))}</span>`;
+    const line2 = sub ?? (p?.username ? `@${p.username}` : (p?.email || ''));
+    return `<div class="who">${avatar}<div style="min-width:0"><div class="cell-main">${esc(name)}</div>${line2 ? `<div class="cell-sub">${esc(line2)}</div>` : ''}</div></div>`;
+  }
+
+  /** Profiles for a set of user ids, as a map. Missing ids are simply absent. */
+  async function profilesFor(ids) {
+    const unique = [...new Set(ids.filter((i) => i && i !== 'deleted-user'))];
+    const map = {};
+    for (let i = 0; i < unique.length; i += 100) {
+      const { data } = await sb.from('profiles')
+        .select('id, full_name, username, email, phone, avatar_url, city, created_at')
+        .in('id', unique.slice(i, i + 100));
+      (data || []).forEach((p) => { map[p.id] = p; });
     }
-    const { data: { session } } = await supabaseClient.auth.getSession();
-    if (!session) return { ok: false, error: 'Your session has expired. Sign in again.' };
+    return map;
+  }
 
+  const loadingHtml = '<div class="card skeleton"><div></div><div></div><div></div><div></div><div></div></div>';
+  const emptyHtml = (icon, title, text) =>
+    `<div class="state"><div class="ico">${icon}</div><h4>${esc(title)}</h4><p>${esc(text)}</p></div>`;
+  const errorHtml = (error) =>
+    `<div class="card"><div class="state"><div class="ico">⚠️</div><h4>${esc(readError(error))}</h4><button class="btn btn-outline" data-action="refresh">Try again</button></div></div>`;
+
+  function tabsHtml(viewId, key, options, current, counts = {}) {
+    return `<div class="tabs">${options.map(([value, label]) =>
+      `<button class="tab ${value === current ? 'active' : ''}" data-action="filter" data-id="${esc(`${viewId}|${key}|${value}`)}">${esc(label)}${counts[value] != null ? `<span class="n">${esc(counts[value])}</span>` : ''}</button>`,
+    ).join('')}</div>`;
+  }
+
+  function download(filename, text) {
+    const blob = new Blob([text], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  // ── Session and permissions ────────────────────────────────────────────────
+  const me = { staff: null, roleName: '', perms: new Set() };
+  const can = (...perms) => perms.some((p) => me.perms.has(p));
+
+  /** Calls the admin-action edge function. Resolves with its result or throws. */
+  async function act(action, targetId, extra = {}) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Your session has expired. Sign in again.');
+    let res;
     try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/admin-action`, {
+      res = await fetch(`${SUPABASE_URL}/functions/v1/admin-action`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: SUPABASE_KEY,
           'Content-Type': 'application/json',
-          'apikey': SUPABASE_ANON_KEY,
         },
         body: JSON.stringify({ action, targetId, ...extra }),
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { ok: false, error: body.reason || body.error || `Failed (${res.status})` };
-      }
-      return { ok: true, result: body.result };
-    } catch (e) {
-      return { ok: false, error: String(e) };
+    } catch (_) {
+      throw new Error('Could not reach the server. Check your connection.');
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(body.reason || body.error || `Failed (${res.status})`);
+    return body.result;
+  }
+
+  /**
+   * Records sign-in / sign-out. Through admin-action, which takes the actor
+   * from the login: the audit table accepts no rows from the browser, where
+   * the actor could be anyone. Never fails the sign-in or sign-out itself.
+   */
+  function auditClient(eventName) {
+    if (!me.staff) return Promise.resolve();
+    return act(eventName, 'self').catch(() => {});
+  }
+
+  // ── Auth screens ───────────────────────────────────────────────────────────
+  function showAuth(mode, note) {
+    $('#app').hidden = true;
+    $('#authScreen').hidden = false;
+    $('#signInForm').hidden = mode !== 'signin';
+    $('#forgotForm').hidden = mode !== 'forgot';
+    $('#setPasswordForm').hidden = mode !== 'set-password';
+    $('#authSubtitle').textContent = {
+      signin: 'Sign in with your staff account',
+      forgot: 'Reset your password',
+      'set-password': note === 'invite' ? 'Welcome — set your password' : 'Set a new password',
+    }[mode];
+    if (mode === 'set-password') {
+      $('#setPasswordNote').textContent = note === 'invite'
+        ? 'You have been invited to the DoggyJi admin portal. Choose a password to finish setting up your account.'
+        : 'Choose a new password for your staff account.';
     }
   }
 
-  // ── 0b. EVENT DELEGATION FOR TABLE ROW ACTIONS ──────────────────────────────
-  // Row buttons used to carry onclick="fn('${attr(id)}')". Escaping is not
-  // enough there: an onclick attribute is parsed as HTML first and evaluated
-  // as JavaScript second, so &#39; is decoded back to a quote before the
-  // engine sees it. A pet name of  x');alert(1);//  therefore broke out of the
-  // string and ran in an administrator's session — and pet names come from
-  // anyone who can sign up.
-  //
-  // The id now travels as a data attribute, which is inert, and the handler is
-  // attached here rather than written into markup. esc() still applies, so the
-  // attribute itself cannot be broken out of either.
-  const ROW_ACTIONS = {
-    'review-provider': (id) => window.openProviderReviewModal(id),
-    'booking-override': (id) => window.openBookingActionModal(id),
-    'blood-dispatch': (id) => window.openBloodDispatchModal(id),
-    'inspect-audit': (id) => window.inspectAuditEvent(id),
-    'dispatch-donor': (id) => window.dispatchDirectAlert(id),
-  };
+  async function enter(freshSignIn) {
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) { showAuth('signin'); return; }
 
-  document.addEventListener('click', (event) => {
-    const el = event.target.closest('[data-action]');
-    if (!el) return;
-    const handler = ROW_ACTIONS[el.dataset.action];
-    if (handler) handler(el.dataset.id);
+    const { data: staff, error } = await sb.from('admin_users')
+      .select('id, employee_id, full_name, email, role_id, status')
+      .eq('auth_user_id', user.id)
+      .maybeSingle();
+
+    if (error || !staff) {
+      await sb.auth.signOut();
+      showAuth('signin');
+      toast('This account does not have staff access. Ask a Super Administrator to invite you.', 'error');
+      return;
+    }
+    if (staff.status !== 'active') {
+      await sb.auth.signOut();
+      showAuth('signin');
+      toast(`This staff account is ${staff.status}.`, 'error');
+      return;
+    }
+
+    const [{ data: perms }, { data: role }] = await Promise.all([
+      sb.from('admin_role_permissions').select('permission_id').eq('role_id', staff.role_id),
+      sb.from('admin_roles').select('name').eq('id', staff.role_id).maybeSingle(),
+    ]);
+    me.staff = staff;
+    me.perms = new Set((perms || []).map((p) => p.permission_id));
+    me.roleName = role?.name || titleCase(staff.role_id);
+
+    $('#meName').textContent = staff.full_name || staff.email;
+    $('#meRole').textContent = me.roleName;
+    $('#authScreen').hidden = true;
+    $('#app').hidden = false;
+    buildNav();
+    if (freshSignIn) auditClient('session.signed_in');
+    if (!location.hash.startsWith('#/')) location.hash = `#/${firstView()}`;
+    else route();
+    refreshCounts();
+  }
+
+  $('#signInForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = e.submitter || $('#signInForm button[type=submit]');
+    btn.disabled = true;
+    try {
+      const { error } = await sb.auth.signInWithPassword({
+        email: $('#signInEmail').value.trim().toLowerCase(),
+        password: $('#signInPassword').value,
+      });
+      if (error) {
+        // Not distinguishing "no such account" from "wrong password": that
+        // difference would tell an attacker which emails are staff.
+        toast(/banned/i.test(error.message) ? 'This account is suspended.' : 'Incorrect email or password.', 'error');
+        return;
+      }
+      $('#signInPassword').value = '';
+      await enter(true);
+    } catch (_) {
+      toast('Could not sign in. Check your connection and try again.', 'error');
+    } finally {
+      btn.disabled = false;
+    }
   });
 
-  // ── 0. SUPABASE LIVE CONFIGURATION ──────────────────────────────────────────
-  let SUPABASE_URL = localStorage.getItem('doggyji_cfg_url') || 'https://iythfpzwxrbvxfmutxai.supabase.co';
-  let SUPABASE_ANON_KEY = localStorage.getItem('doggyji_cfg_anon') || 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
-  let supabaseClient = null;
-
-  function createSupabase() {
-    try {
-      if (window.supabase && typeof window.supabase.createClient === 'function') {
-        supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        console.log('DoggyJi Admin: Supabase client initialized ->', SUPABASE_URL);
-        return supabaseClient;
-      }
-    } catch (e) {
-      console.warn('Failed to initialize Supabase client:', e);
+  $('#forgotForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = e.submitter || $('#forgotForm button[type=submit]');
+    btn.disabled = true;
+    const { error } = await sb.auth.resetPasswordForEmail($('#forgotEmail').value.trim().toLowerCase(), {
+      redirectTo: location.origin + location.pathname,
+    });
+    btn.disabled = false;
+    if (error && /rate|seconds/i.test(error.message)) {
+      toast('Too many requests. Wait a minute and try again.', 'warning');
+      return;
     }
+    toast('If that email belongs to a staff account, a reset link is on its way.', 'success');
+    showAuth('signin');
+  });
+
+  $('#setPasswordForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const a = $('#newPassword').value;
+    const b = $('#newPassword2').value;
+    if (a.length < 10) { toast('Use at least 10 characters.', 'warning'); return; }
+    if (a !== b) { toast('The two passwords do not match.', 'warning'); return; }
+    const btn = e.submitter || $('#setPasswordForm button[type=submit]');
+    btn.disabled = true;
+    const { error } = await sb.auth.updateUser({ password: a });
+    btn.disabled = false;
+    if (error) { toast(error.message || 'Could not save the password.', 'error'); return; }
+    $('#newPassword').value = '';
+    $('#newPassword2').value = '';
+    history.replaceState(null, '', location.pathname);
+    toast('Password saved.', 'success');
+    await enter(true);
+  });
+
+  sb.auth.onAuthStateChange((event) => {
+    if (event === 'PASSWORD_RECOVERY') showAuth('set-password', 'recovery');
+  });
+
+  async function signOut() {
+    // Before signing out: the record needs this session.
+    await auditClient('session.signed_out');
+    await sb.auth.signOut().catch(() => {});
+    me.staff = null;
+    me.perms = new Set();
+    history.replaceState(null, '', location.pathname);
+    showAuth('signin');
+  }
+
+  // ── Modal ──────────────────────────────────────────────────────────────────
+  let modalHandlers = {};
+
+  function openModal({ title, subtitle = '', body, foot = '', wide = false, handlers = {} }) {
+    modalHandlers = handlers;
+    $('#modalRoot').innerHTML = `
+      <div class="modal-backdrop" data-backdrop>
+        <div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div><h2>${esc(title)}</h2>${subtitle ? `<p>${esc(subtitle)}</p>` : ''}</div>
+            <button class="icon-btn close" data-action="close-modal" aria-label="Close">✕</button>
+          </div>
+          <div class="modal-body">${body}</div>
+          ${foot ? `<div class="modal-foot">${foot}</div>` : ''}
+        </div>
+      </div>`;
+    const first = $('#modalRoot .modal-body input, #modalRoot .modal-body select, #modalRoot .modal-body textarea');
+    if (first) first.focus();
+    return $('#modalRoot .modal');
+  }
+
+  function closeModal() {
+    $('#modalRoot').innerHTML = '';
+    modalHandlers = {};
+  }
+
+  $('#modalRoot').addEventListener('mousedown', (e) => {
+    if (e.target.matches('[data-backdrop]')) closeModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#modalRoot').innerHTML) closeModal();
+  });
+
+  /**
+   * Asks for confirmation, optionally with a text field. Resolves with the
+   * text ('' when there is no field) or null when cancelled.
+   */
+  function confirmBox({ title, message, confirmLabel = 'Confirm', tone = 'primary', field = null }) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; closeModal(); resolve(v); } };
+      openModal({
+        title,
+        body: `<p style="margin-bottom:${field ? 14 : 0}px">${esc(message)}</p>${field ? `
+          <div class="field"><label for="confirmField">${esc(field.label)}${field.required ? ' *' : ''}</label>
+          <textarea class="textarea" id="confirmField" placeholder="${esc(field.placeholder || '')}">${esc(field.value || '')}</textarea></div>` : ''}`,
+        foot: `<button class="btn btn-ghost" data-action="m" data-id="cancel">Cancel</button>
+               <button class="btn btn-${tone}" data-action="m" data-id="ok">${esc(confirmLabel)}</button>`,
+        handlers: {
+          cancel: () => finish(null),
+          ok: () => {
+            const v = field ? $('#confirmField').value.trim() : '';
+            if (field?.required && !v) { toast(`${field.label} is required.`, 'warning'); return; }
+            finish(v);
+          },
+        },
+      });
+      const observer = new MutationObserver(() => {
+        if (!$('#modalRoot').innerHTML) { observer.disconnect(); if (!done) { done = true; resolve(null); } }
+      });
+      observer.observe($('#modalRoot'), { childList: true });
+    });
+  }
+
+  /** Runs fn with the button disabled, toasting a thrown error. */
+  async function busy(btn, fn) {
+    if (btn) btn.disabled = true;
+    try {
+      return await fn();
+    } catch (e) {
+      toast(e.message || 'Something went wrong.', 'error');
+      return undefined;
+    } finally {
+      if (btn && btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  // ── Views registry and router ──────────────────────────────────────────────
+  const state = {
+    reports: { status: 'open' },
+    users: { filter: 'all', q: '' },
+    providers: { status: 'pending' },
+    bookings: { status: 'all' },
+    directory: { kind: 'vet_clinics', status: 'pending' },
+    blood: { tab: 'requests', status: 'active' },
+    orders: { q: '' },
+    audit: { result: 'all', q: '' },
+  };
+
+  const VIEWS = [
+    { id: 'dashboard', label: 'Dashboard', icon: '📊', section: 'Overview', perms: ['dashboard.view'],
+      title: 'Dashboard', subtitle: 'What needs attention across the app' },
+    { id: 'reports', label: 'User reports', icon: '🚩', section: 'Trust & safety', perms: ['reports.view', 'reports.manage'],
+      title: 'User reports', subtitle: 'Reports filed from chats, profiles and Pet Match',
+      count: () => countOf('user_reports', (b) => b.eq('status', 'open')) },
+    { id: 'users', label: 'Users', icon: '👤', section: 'Trust & safety', perms: ['users.view', 'users.manage'],
+      title: 'Users', subtitle: 'App accounts, their pets and their history' },
+    { id: 'providers', label: 'Service providers', icon: '🛡️', section: 'Services', perms: ['providers.view'],
+      title: 'Service providers', subtitle: 'Applications, KYC documents and verification',
+      count: () => countOf('service_providers', (b) => b.eq('verification_status', 'pending')) },
+    { id: 'bookings', label: 'Bookings', icon: '📅', section: 'Services', perms: ['bookings.view', 'bookings.manage'],
+      title: 'Bookings', subtitle: 'Service bookings made in the app',
+      count: () => countOf('service_bookings', (b) => b.eq('status', 'pending')), soft: true },
+    { id: 'directory', label: 'Clinics & blood banks', icon: '🏥', section: 'Services', perms: ['clinics.view', 'clinics.approve'],
+      title: 'Clinics & blood banks', subtitle: 'Listings submitted by users, waiting for review',
+      count: async () => {
+        const [a, b] = await Promise.all([
+          countOf('vet_clinics', (x) => x.eq('verification_status', 'pending')),
+          countOf('blood_banks', (x) => x.eq('verification_status', 'pending')),
+        ]);
+        return (a ?? 0) + (b ?? 0);
+      } },
+    { id: 'blood', label: 'Blood SOS', icon: '🩸', section: 'Emergency', perms: ['blood.view', 'blood.manage', 'blood.contact'],
+      title: 'Blood SOS', subtitle: 'Emergency requests, donor responses and call requests',
+      count: async () => {
+        const [reqs, calls] = await Promise.all([
+          countOf('blood_requests', (b) => b.eq('status', 'active').gt('expires_at', new Date().toISOString())),
+          can('blood.contact', 'blood.manage') ? countOf('donor_contact_escalations', (b) => b.eq('status', 'open')) : 0,
+        ]);
+        return (reqs ?? 0) + (calls ?? 0);
+      } },
+    { id: 'banners', label: 'Home banners', icon: '🖼️', section: 'Content', perms: ['banners.manage'],
+      title: 'Home banners', subtitle: 'The carousel at the top of the app’s home screen' },
+    { id: 'announce', label: 'Notifications', icon: '📣', section: 'Content', perms: ['notifications.send'],
+      title: 'Notifications', subtitle: 'Send an announcement: a push notification plus a message in the app’s inbox' },
+    { id: 'orders', label: 'Orders', icon: '📦', section: 'Content', perms: ['orders.view', 'orders.manage'],
+      title: 'Orders', subtitle: 'Shop orders synced from Shopify (read-only here)' },
+    { id: 'staff', label: 'Staff & roles', icon: '👥', section: 'Administration', perms: ['employees.view', 'employees.manage'],
+      title: 'Staff & roles', subtitle: 'Who can use this portal, and what each role may do' },
+    { id: 'audit', label: 'Audit log', icon: '📜', section: 'Administration', perms: ['audit.view'],
+      title: 'Audit log', subtitle: 'Every staff action, recorded server-side and append-only' },
+  ];
+
+  const allowed = (v) => v.perms.some((p) => me.perms.has(p));
+  const firstView = () => (VIEWS.find(allowed) || VIEWS[0]).id;
+
+  function buildNav() {
+    let html = '';
+    let section = '';
+    for (const v of VIEWS.filter(allowed)) {
+      if (v.section !== section) {
+        section = v.section;
+        html += `<div class="nav-section">${esc(section)}</div>`;
+      }
+      html += `<a class="nav-link" href="#/${v.id}" data-view="${v.id}"><span class="ico">${v.icon}</span><span>${esc(v.label)}</span><span class="nav-count ${v.soft ? 'soft' : ''}" id="count-${v.id}" hidden></span></a>`;
+    }
+    $('#nav').innerHTML = html || '<p class="note" style="padding:12px">Your role has no sections yet.</p>';
+  }
+
+  async function refreshCounts() {
+    await Promise.all(VIEWS.filter((v) => v.count && allowed(v)).map(async (v) => {
+      const n = await v.count().catch(() => null);
+      const el = document.getElementById(`count-${v.id}`);
+      if (!el) return;
+      el.hidden = !n;
+      el.textContent = n ?? '';
+    }));
+  }
+
+  let currentView = null;
+  let renderToken = 0;
+
+  async function route() {
+    if (!me.staff) return;
+    const id = (location.hash.match(/^#\/([\w-]+)/) || [])[1];
+    let view = VIEWS.find((v) => v.id === id);
+    if (!view || !allowed(view)) {
+      location.replace(`#/${firstView()}`);
+      return;
+    }
+    currentView = view;
+    document.body.classList.remove('nav-open');
+    document.querySelectorAll('.nav-link').forEach((a) => a.classList.toggle('active', a.dataset.view === view.id));
+    $('#pageTitle').textContent = view.title;
+    $('#pageSubtitle').textContent = view.subtitle;
+    document.title = `${view.title} · DoggyJi Admin`;
+    await renderCurrent();
+  }
+
+  async function renderCurrent() {
+    if (!currentView) return;
+    const token = ++renderToken;
+    const root = $('#view');
+    root.innerHTML = loadingHtml;
+    try {
+      const html = await RENDER[currentView.id]();
+      if (token !== renderToken) return; // a newer render started meanwhile
+      root.innerHTML = html;
+      AFTER[currentView.id]?.();
+    } catch (e) {
+      console.error(e);
+      if (token === renderToken) root.innerHTML = errorHtml(e);
+    }
+  }
+
+  window.addEventListener('hashchange', route);
+  setInterval(() => { if (me.staff && !document.hidden) refreshCounts(); }, 60000);
+
+  // ── Global click delegation ────────────────────────────────────────────────
+  const ACTIONS = {
+    'toggle-password': (id, el) => {
+      const input = document.getElementById(id);
+      input.type = input.type === 'password' ? 'text' : 'password';
+      el.textContent = input.type === 'password' ? 'Show' : 'Hide';
+    },
+    'show-auth': (mode) => showAuth(mode),
+    'open-nav': () => document.body.classList.add('nav-open'),
+    'close-nav': () => document.body.classList.remove('nav-open'),
+    refresh: () => { renderCurrent(); refreshCounts(); },
+    'toggle-theme': () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('doggyji_admin_theme', next); } catch (_) {}
+      themeIcon();
+      if (currentView?.id === 'dashboard') renderCurrent();
+    },
+    'sign-out': () => signOut(),
+    'close-modal': () => closeModal(),
+    m: (id, el) => modalHandlers[id]?.(el),
+    filter: (id) => {
+      const [view, key, value] = id.split('|');
+      state[view][key] = value;
+      if (view === 'directory' && key === 'kind') state.directory.status = 'pending';
+      if (view === 'blood' && key === 'tab') state.blood.status = value === 'requests' ? 'active' : 'open';
+      renderCurrent();
+    },
+  };
+
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const fn = ACTIONS[el.dataset.action];
+    if (!fn) return;
+    e.preventDefault();
+    fn(el.dataset.id, el, e);
+  });
+
+  function themeIcon() {
+    $('#themeBtn').textContent = document.documentElement.dataset.theme === 'dark' ? '☀️' : '🌙';
+  }
+
+  const RENDER = {};
+  const AFTER = {};
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Dashboard
+  // ════════════════════════════════════════════════════════════════════════════
+  let activityChart = null;
+
+  RENDER.dashboard = async () => {
+    const now = new Date().toISOString();
+    const week = new Date(Date.now() - 7 * 864e5).toISOString();
+    const jobs = {};
+    if (can('reports.view', 'reports.manage')) jobs.reports = countOf('user_reports', (b) => b.eq('status', 'open'));
+    if (can('providers.view')) jobs.providers = countOf('service_providers', (b) => b.eq('verification_status', 'pending'));
+    if (can('clinics.view', 'clinics.approve')) {
+      jobs.clinics = countOf('vet_clinics', (b) => b.eq('verification_status', 'pending'));
+      jobs.banks = countOf('blood_banks', (b) => b.eq('verification_status', 'pending'));
+    }
+    if (can('blood.view', 'blood.manage', 'blood.contact')) {
+      jobs.sos = countOf('blood_requests', (b) => b.eq('status', 'active').gt('expires_at', now));
+    }
+    if (can('blood.contact', 'blood.manage')) jobs.calls = countOf('donor_contact_escalations', (b) => b.eq('status', 'open'));
+    if (can('bookings.view', 'bookings.manage')) jobs.bookings = countOf('service_bookings', (b) => b.eq('status', 'pending'));
+    if (can('users.view', 'users.manage')) {
+      jobs.users = countOf('profiles');
+      jobs.newUsers = countOf('profiles', (b) => b.gte('created_at', week));
+    }
+    if (can('orders.view', 'orders.manage')) jobs.orders = countOf('orders', (b) => b.gte('placed_at', week));
+
+    const keys = Object.keys(jobs);
+    const values = await Promise.all(Object.values(jobs));
+    const n = Object.fromEntries(keys.map((k, i) => [k, values[i]]));
+    const show = (k) => k in n;
+    const num = (k) => (n[k] == null ? '—' : n[k]);
+
+    const metric = (k, label, icon, href, sub, tone) => (show(k)
+      ? `<a class="metric ${n[k] > 0 && tone ? tone : ''}" href="#/${href}"><span class="metric-label">${icon} ${esc(label)}</span><span class="metric-value">${esc(num(k))}</span><span class="metric-sub">${esc(sub)}</span></a>`
+      : '');
+
+    const listings = show('clinics') ? (n.clinics ?? 0) + (n.banks ?? 0) : null;
+    const metrics = [
+      metric('sos', 'Active SOS', '🩸', 'blood', 'Open, not expired', 'alert'),
+      metric('calls', 'Call requests', '📞', 'blood', 'Waiting for the team', 'alert'),
+      metric('reports', 'Open reports', '🚩', 'reports', 'Not reviewed yet', 'warn'),
+      metric('providers', 'Pending providers', '🛡️', 'providers', 'Awaiting verification', 'warn'),
+      show('clinics') ? `<a class="metric ${listings > 0 ? 'warn' : ''}" href="#/directory"><span class="metric-label">🏥 Pending listings</span><span class="metric-value">${esc(listings)}</span><span class="metric-sub">Clinics and blood banks</span></a>` : '',
+      metric('bookings', 'Pending bookings', '📅', 'bookings', 'Not confirmed yet', ''),
+      metric('users', 'Users', '👤', 'users', show('newUsers') ? `+${num('newUsers')} in the last 7 days` : '', ''),
+      metric('orders', 'Orders (7 days)', '📦', 'orders', 'From Shopify', ''),
+    ].join('');
+
+    const attention = [
+      ['sos', '🩸', 'Active blood SOS requests', 'blood'],
+      ['calls', '📞', 'Donor call requests to handle', 'blood'],
+      ['reports', '🚩', 'User reports to review', 'reports'],
+      ['providers', '🛡️', 'Provider applications to verify', 'providers'],
+    ].filter(([k]) => n[k] > 0);
+    if (listings > 0) attention.push(['listings', '🏥', 'Clinic / blood bank listings to review', 'directory']);
+
+    const attentionHtml = attention.length
+      ? `<ul class="attention">${attention.map(([k, icon, label, href]) =>
+        `<li><a href="#/${href}"><span>${icon}</span><span>${esc(label)}</span><span class="n">${esc(k === 'listings' ? listings : n[k])}</span></a></li>`).join('')}</ul>`
+      : '<div class="all-clear">✅ Nothing is waiting on the team right now.</div>';
+
+    let recent = '';
+    if (can('audit.view')) {
+      const { data } = await sb.from('admin_audit_logs').select('event_name, actor, created_at, result')
+        .order('created_at', { ascending: false }).limit(6);
+      recent = `<div class="card"><div class="card-head"><div><h3>Recent staff activity</h3></div><a class="btn btn-ghost btn-sm" href="#/audit">Audit log →</a></div>
+        ${(data || []).length ? `<div class="list-rows" style="margin:12px 16px 16px">${data.map((a) => `
+          <div class="list-row"><div class="grow"><div class="cell-main mono">${esc(a.event_name)}</div>
+          <div class="cell-sub">${esc(a.actor?.name || a.actor?.email || 'System')} · ${esc(ago(a.created_at))}</div></div>
+          ${a.result === 'SUCCESS' ? '' : badge(a.result === 'DENIED' ? 'Denied' : 'Failed', a.result === 'DENIED' ? 'red' : 'amber')}</div>`).join('')}</div>`
+    : '<div class="all-clear">No staff activity yet.</div>'}</div>`;
+    }
+
+    // The chart draws sign-ups, SOS requests and reports; a role that can
+    // read none of them would get an empty chart.
+    const chart = can('users.view', 'users.manage', 'blood.view', 'blood.manage', 'blood.contact', 'reports.view', 'reports.manage')
+      ? `<div class="card"><div class="card-head"><div><h3>Activity, last 14 days</h3><p>Sign-ups, SOS requests and reports per day</p></div></div>
+          <div class="chart-box"><canvas id="activityChart"></canvas></div></div>`
+      : '';
+
+    return `
+      <div class="metrics">${metrics || ''}</div>
+      <div class="${chart ? 'grid-2' : ''}">
+        ${chart}
+        <div class="stack">
+          <div class="card"><div class="card-head"><div><h3>Needs attention</h3></div></div>${attentionHtml}</div>
+          ${recent}
+        </div>
+      </div>`;
+  };
+
+  AFTER.dashboard = async () => {
+    const canvas = document.getElementById('activityChart');
+    if (!canvas || !window.Chart) return;
+    const since = new Date();
+    since.setHours(0, 0, 0, 0);
+    since.setDate(since.getDate() - 13);
+    const days = [...Array(14)].map((_, i) => {
+      const d = new Date(since);
+      d.setDate(since.getDate() + i);
+      return d;
+    });
+    const key = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const series = async (table, column, color, label, allowedNow) => {
+      if (!allowedNow) return null;
+      const { data } = await sb.from(table).select(column).gte(column, since.toISOString()).limit(5000);
+      const byDay = {};
+      (data || []).forEach((r) => { const k = key(new Date(r[column])); byDay[k] = (byDay[k] || 0) + 1; });
+      // Monotone: whole-number daily counts must not overshoot between points.
+      return { label, data: days.map((d) => byDay[key(d)] || 0), borderColor: color, backgroundColor: color, cubicInterpolationMode: 'monotone', pointRadius: 2 };
+    };
+    const datasets = (await Promise.all([
+      series('profiles', 'created_at', '#23C1C3', 'New users', can('users.view', 'users.manage')),
+      series('blood_requests', 'created_at', '#EF4444', 'SOS requests', can('blood.view', 'blood.manage', 'blood.contact')),
+      series('user_reports', 'created_at', '#F5A524', 'Reports', can('reports.view', 'reports.manage')),
+    ])).filter(Boolean);
+    if (!document.getElementById('activityChart')) return;
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const tick = dark ? '#A3B1C6' : '#475569';
+    const grid = dark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.06)';
+    activityChart?.destroy();
+    activityChart = new window.Chart(canvas, {
+      type: 'line',
+      data: { labels: days.map((d) => `${d.getDate()} ${MONTHS[d.getMonth()]}`), datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: tick, boxWidth: 12, font: { family: 'Montserrat' } } } },
+        scales: {
+          x: { grid: { color: grid }, ticks: { color: tick, maxRotation: 0, autoSkip: true } },
+          y: { grid: { color: grid }, ticks: { color: tick, precision: 0 }, beginAtZero: true },
+        },
+      },
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // User reports
+  // ════════════════════════════════════════════════════════════════════════════
+  let reportRows = [];
+  let reportPeople = {};
+
+  RENDER.reports = async () => {
+    const rows = await q(sb.from('user_reports').select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    reportRows = rows;
+    reportPeople = await profilesFor(rows.flatMap((r) => [r.reporter_id, r.reported_id]));
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[r.status] = (counts[r.status] || 0) + 1; });
+    const s = state.reports.status;
+    const list = s === 'all' ? rows : rows.filter((r) => r.status === s);
+    const tabs = tabsHtml('reports', 'status',
+      [['open', 'Open'], ['reviewing', 'Reviewing'], ['actioned', 'Action taken'], ['dismissed', 'Dismissed'], ['all', 'All']], s, counts);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+        <th>Reported user</th><th>Reason</th><th class="hide-sm">Reported by</th><th>Filed</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map((r) => `<tr>
+          <td>${personCell(reportPeople[r.reported_id], r.reported_id)}</td>
+          <td><div class="cell-main">${esc(titleCase(r.reason))}</div>${r.details ? `<div class="cell-sub cell-clip">${esc(r.details)}</div>` : ''}</td>
+          <td class="hide-sm">${personCell(reportPeople[r.reporter_id], r.reporter_id)}</td>
+          <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+          <td>${statusBadge(r.status)}</td>
+          <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-report" data-id="${esc(r.id)}">Review</button></td>
+        </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🚩', s === 'open' ? 'No open reports' : 'Nothing here', s === 'open' ? 'Reports people file from chats, profiles and Pet Match show up here.' : 'No reports with this status.');
+
+    return `<div class="toolbar">${tabs}</div><div class="card">${table}</div>${rows.length >= LIST_LIMIT ? `<p class="note">Showing the latest ${LIST_LIMIT} reports.</p>` : ''}`;
+  };
+
+  ACTIONS['open-report'] = async (id) => {
+    const r = reportRows.find((x) => x.id === id);
+    if (!r) return;
+    const reported = reportPeople[r.reported_id];
+    const reporter = reportPeople[r.reporter_id];
+    const prior = await countOf('user_reports', (b) => b.eq('reported_id', r.reported_id));
+    const suspended = can('users.view', 'users.manage')
+      ? (await sb.from('user_suspensions').select('user_id').eq('user_id', r.reported_id).maybeSingle()).data
+      : null;
+    const manage = can('reports.manage');
+    const closed = r.status === 'actioned' || r.status === 'dismissed';
+
+    openModal({
+      title: `Report: ${titleCase(r.reason)}`,
+      subtitle: `Filed ${fmtDateTime(r.created_at)}`,
+      wide: true,
+      body: `
+        <div class="detail-grid">
+          <div class="detail"><div class="k">Reported user</div><div class="v">${personCell(reported, r.reported_id)}</div></div>
+          <div class="detail"><div class="k">Reported by</div><div class="v">${personCell(reporter, r.reporter_id)}</div></div>
+          <div class="detail"><div class="k">Status</div><div class="v">${statusBadge(r.status)} ${suspended ? badge('Account suspended', 'red') : ''}</div></div>
+          <div class="detail"><div class="k">Reports against this user</div><div class="v">${esc(prior ?? '—')}</div></div>
+          ${r.chat_id ? `<div class="detail full"><div class="k">From chat</div><div class="v mono">${esc(r.chat_id)}</div></div>` : ''}
+          <div class="detail full"><div class="k">What they said</div><div class="quote">${esc(r.details || 'No details given.')}</div></div>
+          ${r.reviewed_at ? `<div class="detail full"><div class="k">Reviewed</div><div class="v">${esc(r.reviewed_by || '')} · ${esc(fmtDateTime(r.reviewed_at))}${r.resolution ? `<div class="quote" style="margin-top:6px">${esc(r.resolution)}</div>` : ''}</div></div>` : ''}
+        </div>
+        ${manage && !closed ? `<div class="field" style="margin-top:16px"><label for="resolution">Resolution note</label>
+          <textarea class="textarea" id="resolution" placeholder="What was decided and why. Required for Action taken."></textarea></div>` : ''}`,
+      foot: `
+        ${can('users.view', 'users.manage') && r.reported_id !== 'deleted-user' ? `<button class="btn btn-ghost left" data-action="m" data-id="user">View user</button>` : ''}
+        ${can('users.manage') && !suspended && r.reported_id !== 'deleted-user' ? `<button class="btn btn-danger-outline" data-action="m" data-id="suspend">Suspend user</button>` : ''}
+        ${manage && r.status === 'open' ? `<button class="btn btn-outline" data-action="m" data-id="reviewing">Mark reviewing</button>` : ''}
+        ${manage && !closed ? `<button class="btn btn-outline" data-action="m" data-id="dismiss">Dismiss</button>
+                               <button class="btn btn-primary" data-action="m" data-id="actioned">Action taken</button>` : ''}
+        ${manage && closed ? `<button class="btn btn-outline" data-action="m" data-id="reopen">Reopen</button>` : ''}`,
+      handlers: {
+        user: () => { closeModal(); openUser(r.reported_id); },
+        suspend: async (btn) => {
+          const reason = await confirmBox({
+            title: 'Suspend this account?',
+            message: 'They are signed out and cannot sign in. Their pets leave Pet Match and the donor directory. You can restore the account later.',
+            confirmLabel: 'Suspend', tone: 'danger',
+            field: { label: 'Reason', required: true, placeholder: 'Shown to staff in the audit log', value: `Report: ${titleCase(r.reason)}` },
+          });
+          if (reason == null) return;
+          await busy(btn, async () => {
+            await act('user.suspend', r.reported_id, { reason });
+            await act('report.update', r.id, { status: 'actioned', resolution: `Account suspended: ${reason}` });
+            toast('Account suspended and report closed.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+        reviewing: (btn) => updateReport(btn, r, 'reviewing'),
+        dismiss: (btn) => updateReport(btn, r, 'dismissed'),
+        actioned: (btn) => updateReport(btn, r, 'actioned', true),
+        reopen: (btn) => updateReport(btn, r, 'open'),
+      },
+    });
+  };
+
+  async function updateReport(btn, r, status, needNote = false) {
+    const note = $('#resolution')?.value.trim() || null;
+    if (needNote && !note) { toast('Write a resolution note first.', 'warning'); return; }
+    await busy(btn, async () => {
+      await act('report.update', r.id, { status, resolution: note ?? r.resolution ?? null });
+      closeModal();
+      toast('Report updated.', 'success');
+      renderCurrent(); refreshCounts();
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Users
+  // ════════════════════════════════════════════════════════════════════════════
+  RENDER.users = async () => {
+    const { filter, q: search } = state.users;
+    const suspensions = await q(sb.from('user_suspensions').select('*'));
+    const suspended = Object.fromEntries(suspensions.map((s) => [s.user_id, s]));
+
+    let query = sb.from('profiles').select('id, full_name, username, email, phone, avatar_url, city, created_at')
+      .order('created_at', { ascending: false }).limit(200);
+    const term = search.replace(/[,()%*]/g, ' ').trim();
+    if (term) query = query.or(['full_name', 'username', 'email', 'phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
+    if (filter === 'suspended') query = query.in('id', suspensions.length ? suspensions.map((s) => s.user_id) : ['-']);
+    const rows = await q(query);
+
+    const toolbar = `<div class="toolbar">
+      ${tabsHtml('users', 'filter', [['all', 'All'], ['suspended', 'Suspended']], filter, { suspended: suspensions.length })}
+      <span class="grow"></span>
+      <input class="input search" id="userSearch" placeholder="Search name, @username, email or phone" value="${esc(search)}">
+    </div>`;
+
+    const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>User</th><th class="hide-sm">Contact</th><th>City</th><th>Joined</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map((u) => `<tr>
+        <td>${personCell(u, u.id)}</td>
+        <td class="hide-sm"><div>${esc(u.email || '—')}</div><div class="cell-sub">${esc(u.phone || '')}</div></td>
+        <td>${esc(u.city || '—')}</td>
+        <td class="nowrap">${esc(fmtDate(u.created_at))}</td>
+        <td>${suspended[u.id] ? badge('Suspended', 'red') : badge('Active', 'green')}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-user" data-id="${esc(u.id)}">View</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('👤', term ? 'No matching users' : 'No users yet', term ? 'Try a different name, username, email or phone.' : 'People who sign up in the app appear here.');
+
+    return `${toolbar}<div class="card">${table}</div>${rows.length >= 200 ? '<p class="note">Showing the 200 most recent matches. Search to narrow down.</p>' : ''}`;
+  };
+
+  AFTER.users = () => {
+    const input = document.getElementById('userSearch');
+    if (!input) return;
+    input.addEventListener('input', debounce(() => {
+      state.users.q = input.value;
+      renderCurrent().then(() => {
+        const again = document.getElementById('userSearch');
+        if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+      });
+    }, 400));
+  };
+
+  ACTIONS['open-user'] = (id) => openUser(id);
+
+  async function openUser(id) {
+    const [{ data: u }, { data: pets }, { data: susp }, against, filed, donors, providers, orders] = await Promise.all([
+      sb.from('profiles').select('*').eq('id', id).maybeSingle(),
+      sb.from('pets').select('id, name, species, breed, created_at').eq('user_id', id).limit(50),
+      sb.from('user_suspensions').select('*').eq('user_id', id).maybeSingle(),
+      countOf('user_reports', (b) => b.eq('reported_id', id)),
+      countOf('user_reports', (b) => b.eq('reporter_id', id)),
+      countOf('blood_donors', (b) => b.eq('user_id', id)),
+      countOf('service_providers', (b) => b.eq('user_id', id)),
+      can('orders.view', 'orders.manage') ? countOf('orders', (b) => b.eq('user_id', id)) : Promise.resolve(null),
+    ]);
+    if (!u) { toast('This user no longer exists.', 'warning'); return; }
+
+    openModal({
+      title: u.full_name || (u.username ? `@${u.username}` : 'User'),
+      subtitle: `Joined ${fmtDate(u.created_at)} · ID ${u.id}`,
+      wide: true,
+      body: `
+        ${susp ? `<div class="quote" style="border-left:3px solid var(--red);margin-bottom:14px"><strong>Suspended</strong> by ${esc(susp.suspended_by)} on ${esc(fmtDateTime(susp.created_at))}<br>${esc(susp.reason)}</div>` : ''}
+        <div class="detail-grid">
+          <div class="detail"><div class="k">Username</div><div class="v">${esc(u.username ? `@${u.username}` : '—')}</div></div>
+          <div class="detail"><div class="k">City</div><div class="v">${esc(u.city || '—')}</div></div>
+          <div class="detail"><div class="k">Email</div><div class="v">${u.email ? `<a href="mailto:${esc(u.email)}">${esc(u.email)}</a>` : '—'}</div></div>
+          <div class="detail"><div class="k">Phone</div><div class="v">${u.phone ? `<a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : '—'}</div></div>
+          <div class="detail"><div class="k">Reports against / filed</div><div class="v">${esc(against ?? '—')} / ${esc(filed ?? '—')}</div></div>
+          <div class="detail"><div class="k">Donor listings · Provider applications${orders != null ? ' · Orders' : ''}</div><div class="v">${esc(donors ?? '—')} · ${esc(providers ?? '—')}${orders != null ? ` · ${esc(orders)}` : ''}</div></div>
+          ${u.bio ? `<div class="detail full"><div class="k">Bio</div><div class="quote">${esc(u.bio)}</div></div>` : ''}
+        </div>
+        <div class="section-title">Pets (${esc((pets || []).length)})</div>
+        ${(pets || []).length ? `<div class="list-rows">${pets.map((p) => `<div class="list-row"><span>${p.species === 'cat' ? '🐱' : '🐶'}</span>
+          <div class="grow"><div class="cell-main">${esc(p.name)}</div><div class="cell-sub">${esc(p.breed || titleCase(p.species))}</div></div>
+          <span class="cell-sub">${esc(fmtDate(p.created_at))}</span></div>`).join('')}</div>` : '<p class="note" style="margin:0">No pets added.</p>'}`,
+      foot: can('users.manage')
+        ? (susp ? '<button class="btn btn-primary" data-action="m" data-id="restore">Restore account</button>'
+          : '<button class="btn btn-danger" data-action="m" data-id="suspend">Suspend account</button>')
+        : '',
+      handlers: {
+        suspend: async (btn) => {
+          const reason = await confirmBox({
+            title: 'Suspend this account?',
+            message: 'They are signed out and cannot sign in. Their pets leave Pet Match and the donor directory.',
+            confirmLabel: 'Suspend', tone: 'danger',
+            field: { label: 'Reason', required: true, placeholder: 'Why this account is suspended' },
+          });
+          if (reason == null) return;
+          await busy(btn, async () => {
+            await act('user.suspend', id, { reason });
+            toast('Account suspended.', 'success');
+            renderCurrent();
+          });
+        },
+        restore: async (btn) => {
+          const ok = await confirmBox({ title: 'Restore this account?', message: 'They can sign in again. Their pets stay unpublished until they turn Pet Match back on.', confirmLabel: 'Restore' });
+          if (ok == null) return;
+          await busy(btn, async () => {
+            await act('user.unsuspend', id);
+            toast('Account restored.', 'success');
+            renderCurrent();
+          });
+        },
+      },
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Service providers
+  // ════════════════════════════════════════════════════════════════════════════
+  let providerRows = [];
+  let providerPeople = {};
+
+  RENDER.providers = async () => {
+    const rows = await q(sb.from('service_providers').select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    providerRows = rows;
+    providerPeople = await profilesFor(rows.map((p) => p.user_id));
+    const counts = { all: rows.length };
+    rows.forEach((p) => { counts[p.verification_status] = (counts[p.verification_status] || 0) + 1; });
+    const s = state.providers.status;
+    const list = s === 'all' ? rows : rows.filter((p) => p.verification_status === s);
+    const tabs = tabsHtml('providers', 'status', [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']], s, counts);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Provider</th><th>City</th><th>Services</th><th class="hide-sm">Experience</th><th>Status</th><th class="hide-sm">Applied</th><th></th></tr></thead><tbody>
+      ${list.map((p) => `<tr>
+        <td>${personCell({ full_name: p.full_name, avatar_url: p.photo_url }, p.user_id, providerPeople[p.user_id]?.email || '')}</td>
+        <td>${esc(p.city || '—')}${p.area ? `<div class="cell-sub">${esc(p.area)}</div>` : ''}</td>
+        <td><div class="cell-clip">${esc((p.service_types || []).map(titleCase).join(', ') || '—')}</div></td>
+        <td class="hide-sm">${esc(p.years_experience ?? 0)} yrs</td>
+        <td>${statusBadge(p.verification_status)}</td>
+        <td class="hide-sm nowrap">${esc(fmtDate(p.created_at))}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-provider" data-id="${esc(p.id)}">Review</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🛡️', s === 'pending' ? 'No applications waiting' : 'Nothing here', 'Service providers apply from the app’s Pet Services section.');
+
+    return `<div class="toolbar">${tabs}</div><div class="card">${table}</div>`;
+  };
+
+  ACTIONS['open-provider'] = async (id) => {
+    const p = providerRows.find((x) => x.id === id);
+    if (!p) return;
+    const person = providerPeople[p.user_id];
+    const canDocs = can('providers.documents.view');
+    const docs = canDocs
+      ? (await sb.from('provider_documents').select('*').eq('provider_id', p.id).order('created_at')).data || []
+      : null;
+    // Verifying needs approve, rejecting needs reject (as admin-action checks).
+    const canVerifyDocs = can('providers.approve');
+    const canRejectDocs = can('providers.reject');
+    const pricing = p.pricing && typeof p.pricing === 'object' ? Object.entries(p.pricing) : [];
+
+    openModal({
+      title: p.full_name || 'Provider',
+      subtitle: `Applied ${fmtDate(p.created_at)} · ${titleCase(p.verification_status)}`,
+      wide: true,
+      body: `
+        <div class="detail-grid">
+          <div class="detail"><div class="k">City / area</div><div class="v">${esc(p.city || '—')}${p.area ? `, ${esc(p.area)}` : ''}</div></div>
+          <div class="detail"><div class="k">Experience</div><div class="v">${esc(p.years_experience ?? 0)} years · ${esc(p.completed_jobs ?? 0)} jobs · ★ ${esc(p.rating ?? 0)}</div></div>
+          <div class="detail"><div class="k">Email</div><div class="v">${esc(person?.email || '—')}</div></div>
+          <div class="detail"><div class="k">Phone</div><div class="v">${esc(person?.phone || '—')}</div></div>
+          <div class="detail"><div class="k">Services</div><div class="v">${esc((p.service_types || []).map(titleCase).join(', ') || '—')}</div></div>
+          <div class="detail"><div class="k">Pets accepted</div><div class="v">${esc((p.pets_accepted || []).map(titleCase).join(', ') || '—')}</div></div>
+          <div class="detail"><div class="k">Claims (self-declared)</div><div class="v">${p.claimed_quiz_passed || p.safety_quiz_passed ? badge('Safety quiz', 'teal') : ''} ${p.claimed_police_verified || p.police_verified ? badge('Police verification', 'teal') : ''} ${!(p.claimed_quiz_passed || p.safety_quiz_passed || p.claimed_police_verified || p.police_verified) ? '—' : ''}</div></div>
+          <div class="detail"><div class="k">Pricing</div><div class="v">${pricing.length ? pricing.map(([k, v]) => `${esc(titleCase(k))}: ${esc(money(v))}`).join('<br>') : '—'}</div></div>
+          ${p.bio ? `<div class="detail full"><div class="k">Bio</div><div class="quote">${esc(p.bio)}</div></div>` : ''}
+        </div>
+        <div class="section-title">KYC documents</div>
+        ${docs == null ? '<p class="note" style="margin:0">Your role cannot open identity documents.</p>'
+    : docs.length ? `<div class="list-rows">${docs.map((d) => `<div class="list-row">
+            <span>📄</span><div class="grow"><div class="cell-main">${esc(titleCase(d.document_type))}</div>
+            <div class="cell-sub">${esc(d.file_name || '')} · uploaded ${esc(fmtDate(d.created_at))}${d.rejection_reason ? ` · ${esc(d.rejection_reason)}` : ''}</div></div>
+            ${statusBadge(d.status)}
+            <button class="btn btn-outline btn-sm" data-action="m" data-id="${esc(`doc-view:${d.id}`)}">Open</button>
+            ${canVerifyDocs && d.status !== 'verified' ? `<button class="btn btn-ghost btn-sm" data-action="m" data-id="${esc(`doc-ok:${d.id}`)}">Verify</button>` : ''}
+            ${canRejectDocs && d.status !== 'rejected' ? `<button class="btn btn-ghost btn-sm" data-action="m" data-id="${esc(`doc-no:${d.id}`)}">Reject</button>` : ''}
+          </div>`).join('')}</div>`
+      : '<p class="note" style="margin:0">No documents uploaded.</p>'}
+        <p class="note">Opening a document creates a link that works for 2 minutes and is recorded in the audit log.</p>`,
+      foot: `
+        ${can('providers.suspend') && p.verification_status === 'approved' ? '<button class="btn btn-danger-outline left" data-action="m" data-id="suspend">Suspend</button>' : ''}
+        ${can('providers.reject') && p.verification_status !== 'rejected' ? '<button class="btn btn-outline" data-action="m" data-id="reject">Reject</button>' : ''}
+        ${can('providers.request_changes') && p.verification_status !== 'pending' ? '<button class="btn btn-outline" data-action="m" data-id="changes">Back to pending</button>' : ''}
+        ${can('providers.request_changes') && p.verification_status === 'pending' ? '<button class="btn btn-outline" data-action="m" data-id="changes">Request changes</button>' : ''}
+        ${can('providers.approve') && p.verification_status !== 'approved' ? '<button class="btn btn-success" data-action="m" data-id="approve">Approve</button>' : ''}`,
+      handlers: new Proxy({
+        approve: (btn) => decideProvider(btn, p, 'provider.approve', 'Approve this provider?', 'They appear in the app as a verified provider.', false),
+        reject: (btn) => decideProvider(btn, p, 'provider.reject', 'Reject this application?', 'They will not appear in the app.', true),
+        changes: (btn) => decideProvider(btn, p, 'provider.request_changes', 'Ask for changes?', 'The application goes back to pending. Tell them what is missing (you will need to contact them directly).', true),
+        suspend: (btn) => decideProvider(btn, p, 'provider.suspend', 'Suspend this provider?', 'They are removed from the app’s provider directory.', true),
+      }, {
+        get(target, key) {
+          if (key in target) return target[key];
+          const [kind, docId] = String(key).split(':');
+          if (kind === 'doc-view') return () => openDocument(docId);
+          if (kind === 'doc-ok') return (btn) => setDocument(btn, docId, 'verified', p.id);
+          if (kind === 'doc-no') return (btn) => setDocument(btn, docId, 'rejected', p.id);
+          return undefined;
+        },
+      }),
+    });
+  };
+
+  async function decideProvider(btn, p, action, title, message, needReason) {
+    const reason = await confirmBox({
+      title, message, confirmLabel: 'Confirm', tone: action === 'provider.approve' ? 'success' : 'danger',
+      field: { label: needReason ? 'Reason' : 'Note (optional)', required: needReason, placeholder: 'Recorded in the audit log' },
+    });
+    if (reason == null) return;
+    await busy(btn, async () => {
+      await act(action, p.id, { reason: reason || null });
+      toast('Provider updated.', 'success');
+      renderCurrent(); refreshCounts();
+    });
+  }
+
+  async function openDocument(docId) {
+    // Opened before the request so the browser does not block it as a popup.
+    const win = window.open('about:blank', '_blank');
+    try {
+      const result = await act('provider.document.url', docId);
+      if (win) { win.opener = null; win.location.href = result.url; } else window.location.assign(result.url);
+    } catch (e) {
+      win?.close();
+      toast(e.message, 'error');
+    }
+  }
+
+  async function setDocument(btn, docId, status, providerId) {
+    const reason = status === 'rejected'
+      ? await confirmBox({ title: 'Reject this document?', message: 'Say what is wrong so the provider can fix it.', confirmLabel: 'Reject', tone: 'danger', field: { label: 'Reason', required: true } })
+      : '';
+    if (reason == null) return;
+    await busy(btn, async () => {
+      await act('provider.document.set_status', docId, { status, reason: reason || null });
+      toast('Document updated.', 'success');
+      closeModal();
+      ACTIONS['open-provider'](providerId);
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Bookings
+  // ════════════════════════════════════════════════════════════════════════════
+  let bookingRows = [];
+
+  RENDER.bookings = async () => {
+    const rows = await q(sb.from('service_bookings')
+      .select('*, service_providers!provider_id ( full_name )')
+      .order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    bookingRows = rows;
+    const people = await profilesFor(rows.map((b) => b.customer_id));
+    const petIds = [...new Set(rows.map((b) => b.pet_id).filter(Boolean))];
+    const pets = {};
+    if (petIds.length) {
+      const { data } = await sb.from('pets').select('id, name').in('id', petIds);
+      (data || []).forEach((p) => { pets[p.id] = p.name; });
+    }
+    const counts = { all: rows.length };
+    rows.forEach((b) => { counts[b.status] = (counts[b.status] || 0) + 1; });
+    const s = state.bookings.status;
+    const list = s === 'all' ? rows : rows.filter((b) => b.status === s);
+    const tabs = tabsHtml('bookings', 'status',
+      [['all', 'All'], ['pending', 'Pending'], ['confirmed', 'Confirmed'], ['completed', 'Completed'], ['cancelled', 'Cancelled']], s, counts);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>When</th><th>Customer</th><th>Provider</th><th>Service</th><th>Price</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((b) => `<tr>
+        <td class="nowrap"><div class="cell-main">${esc(fmtDate(b.booking_date))}</div><div class="cell-sub">${esc(b.time_slot || '')}</div></td>
+        <td>${personCell(people[b.customer_id], b.customer_id, b.pet_id ? `for ${pets[b.pet_id] || 'a pet'}` : undefined)}</td>
+        <td>${esc(b.service_providers?.full_name || `Provider ${shortId(b.provider_id)}`)}</td>
+        <td>${esc(titleCase(b.service_type))}</td>
+        <td>${esc(money(b.total_price))}<div class="cell-sub">${esc(titleCase(b.payment_status || ''))}</div></td>
+        <td>${statusBadge(b.status)}</td>
+        <td class="actions">${can('bookings.manage') ? `<button class="btn btn-outline btn-sm" data-action="edit-booking" data-id="${esc(b.id)}">Change status</button>` : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📅', 'No bookings', 'Bookings made in the app’s Pet Services section appear here.');
+
+    return `<div class="toolbar">${tabs}</div><div class="card">${table}</div>`;
+  };
+
+  ACTIONS['edit-booking'] = (id) => {
+    const b = bookingRows.find((x) => x.id === id);
+    if (!b) return;
+    openModal({
+      title: 'Change booking status',
+      subtitle: `${titleCase(b.service_type)} on ${fmtDate(b.booking_date)} · currently ${b.status}`,
+      body: `
+        <div class="field"><label for="bkStatus">New status</label>
+          <select class="select" id="bkStatus">${['pending', 'confirmed', 'completed', 'cancelled']
+    .map((s) => `<option value="${s}" ${s === b.status ? 'selected' : ''}>${titleCase(s)}</option>`).join('')}</select></div>
+        <div class="field"><label for="bkReason">Reason *</label>
+          <textarea class="textarea" id="bkReason" placeholder="e.g. Customer asked to cancel by phone"></textarea></div>
+        <p class="note" style="margin:0">Refunds are not handled here: payment for services is arranged outside the app.</p>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>',
+      handlers: {
+        save: async (btn) => {
+          const status = $('#bkStatus').value;
+          const reason = $('#bkReason').value.trim();
+          if (!reason) { toast('A reason is required.', 'warning'); return; }
+          if (status === b.status) { closeModal(); return; }
+          await busy(btn, async () => {
+            await act('booking.set_status', b.id, { status, reason });
+            closeModal();
+            toast('Booking updated.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Clinics & blood banks
+  // ════════════════════════════════════════════════════════════════════════════
+  let directoryRows = [];
+
+  RENDER.directory = async () => {
+    const { kind, status } = state.directory;
+    const rows = await q(sb.from(kind).select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    directoryRows = rows;
+    const people = await profilesFor(rows.map((r) => r.submitted_by));
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[r.verification_status] = (counts[r.verification_status] || 0) + 1; });
+    const list = status === 'all' ? rows : rows.filter((r) => r.verification_status === status);
+    const isClinic = kind === 'vet_clinics';
+    const approve = can('clinics.approve');
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Name</th><th>City</th><th class="hide-sm">Phone</th><th>${isClinic ? 'Specialties / hours' : 'Blood types'}</th><th class="hide-sm">Submitted by</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((r) => `<tr>
+        <td><div class="cell-main">${esc(r.name)}</div><div class="cell-sub cell-clip">${esc(r.address || '')}</div></td>
+        <td>${esc(r.city || '—')}</td>
+        <td class="hide-sm nowrap">${r.phone ? `<a href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : '—'}</td>
+        <td><div class="cell-clip">${isClinic
+    ? esc([(r.specialties || []).join(', '), r.operating_hours].filter(Boolean).join(' · ') || '—')
+    : esc(`${(r.available_blood_types || []).join(', ') || '—'}${r.is_24_hours ? ' · 24 hours' : ''}`)}</div></td>
+        <td class="hide-sm">${r.submitted_by ? personCell(people[r.submitted_by], r.submitted_by) : '<span class="cell-sub">Team</span>'}</td>
+        <td>${statusBadge(r.verification_status)}</td>
+        <td class="actions">${approve ? `
+          ${r.verification_status !== 'approved' ? `<button class="btn btn-success btn-sm" data-action="set-listing" data-id="${esc(`${r.id}|approved`)}">Approve</button>` : ''}
+          ${r.verification_status !== 'rejected' ? `<button class="btn btn-outline btn-sm" data-action="set-listing" data-id="${esc(`${r.id}|rejected`)}">Reject</button>` : ''}` : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🏥', status === 'pending' ? 'Nothing waiting for review' : 'Nothing here', 'Users submit clinics from Vet Finder and blood banks from the Blood Bank screen.');
+
+    return `<div class="toolbar">
+        ${tabsHtml('directory', 'kind', [['vet_clinics', 'Vet clinics'], ['blood_banks', 'Blood banks']], kind)}
+        <span class="grow"></span>
+        ${tabsHtml('directory', 'status', [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']], status, counts)}
+      </div><div class="card">${table}</div>
+      <p class="note">Approved listings are shown to everyone in the app; pending and rejected ones only to the person who submitted them.</p>`;
+  };
+
+  ACTIONS['set-listing'] = async (id, btn) => {
+    const [rowId, status] = id.split('|');
+    const r = directoryRows.find((x) => x.id === rowId);
+    if (!r) return;
+    const ok = await confirmBox({
+      title: `${status === 'approved' ? 'Approve' : 'Reject'} “${r.name}”?`,
+      message: status === 'approved' ? 'It becomes visible to everyone in the app.' : 'It is hidden from the app.',
+      confirmLabel: status === 'approved' ? 'Approve' : 'Reject',
+      tone: status === 'approved' ? 'success' : 'danger',
+    });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      await act('directory.set_status', rowId, { kind: state.directory.kind, status });
+      toast('Listing updated.', 'success');
+      renderCurrent(); refreshCounts();
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Blood SOS
+  // ════════════════════════════════════════════════════════════════════════════
+  let bloodRows = [];
+  let bloodAlerts = {};
+  let bloodPeople = {};
+  let escalationRows = [];
+
+  const isExpired = (r) => r.status === 'active' && r.expires_at && new Date(r.expires_at) < new Date();
+
+  RENDER.blood = async () => {
+    const canCalls = can('blood.contact', 'blood.manage');
+    const tab = state.blood.tab;
+    const tabs = tabsHtml('blood', 'tab', [['requests', 'SOS requests'], ...(canCalls ? [['calls', 'Call requests'], ['donors', 'Donors']] : [])], tab);
+    let body = '';
+    if (tab === 'calls' && canCalls) body = await renderCalls();
+    else if (tab === 'donors' && canCalls) body = await renderDonors();
+    else body = await renderRequests();
+    return `<div class="toolbar">${tabs}</div>${body}`;
+  };
+
+  async function renderRequests() {
+    const rows = await q(sb.from('blood_requests').select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    bloodRows = rows;
+    bloodAlerts = {};
+    const ids = rows.map((r) => r.id);
+    for (let i = 0; i < ids.length; i += 100) {
+      const { data } = await sb.from('blood_request_alerts').select('request_id, status, donor_id, donor_user_id, responded_at')
+        .in('request_id', ids.slice(i, i + 100));
+      (data || []).forEach((a) => { (bloodAlerts[a.request_id] ||= []).push(a); });
+    }
+    bloodPeople = await profilesFor(rows.map((r) => r.requester_id));
+    const shown = (r) => (isExpired(r) ? 'expired' : r.status);
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[shown(r)] = (counts[shown(r)] || 0) + 1; });
+    const s = state.blood.status;
+    const list = s === 'all' ? rows : rows.filter((r) => shown(r) === s);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Patient</th><th>Hospital</th><th>Urgency</th><th>Raised</th><th>Donors</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((r) => {
+    const alerts = bloodAlerts[r.id] || [];
+    const accepted = alerts.filter((a) => a.status === 'accepted').length;
+    return `<tr>
+        <td><div class="cell-main">${esc(r.pet_name)} <span class="badge b-red">${esc(r.blood_group)}</span></div><div class="cell-sub">${esc(titleCase(r.species))}</div></td>
+        <td><div>${esc(r.hospital_name)}</div><div class="cell-sub">${esc(r.hospital_city)}</div></td>
+        <td>${badge(titleCase(r.urgency_level || 'critical'), r.urgency_level === 'routine' ? 'slate' : r.urgency_level === 'urgent' ? 'amber' : 'red')}</td>
+        <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+        <td>${esc(alerts.length)} alerted<div class="cell-sub">${accepted ? `<span style="color:var(--green);font-weight:700">${esc(accepted)} accepted</span>` : 'none accepted'}</div></td>
+        <td>${statusBadge(shown(r))}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-sos" data-id="${esc(r.id)}">Details</button></td>
+      </tr>`;
+  }).join('')}</tbody></table></div>`
+      : emptyHtml('🩸', s === 'active' ? 'No active SOS requests' : 'Nothing here', 'Emergency blood requests raised in the app appear here.');
+
+    return `<div class="toolbar">${tabsHtml('blood', 'status', [['active', 'Active'], ['fulfilled', 'Fulfilled'], ['expired', 'Expired'], ['closed', 'Closed'], ['all', 'All']], s, counts)}</div>
+      <div class="card">${table}</div>`;
+  }
+
+  ACTIONS['open-sos'] = async (id) => {
+    const r = bloodRows.find((x) => x.id === id);
+    if (!r) return;
+    const alerts = bloodAlerts[r.id] || [];
+    const canContact = can('blood.contact');
+    const donorIds = alerts.map((a) => a.donor_id).filter(Boolean);
+    const donors = {};
+    if (donorIds.length && can('blood.contact', 'blood.manage')) {
+      const { data } = await sb.from('blood_donors')
+        .select(`id, pet_name, blood_group, city${canContact ? ', emergency_contact' : ''}`).in('id', donorIds);
+      (data || []).forEach((d) => { donors[d.id] = d; });
+    }
+    const requester = bloodPeople[r.requester_id];
+    openModal({
+      title: `${r.pet_name} needs ${r.blood_group}`,
+      subtitle: `Raised ${fmtDateTime(r.created_at)} · expires ${fmtDateTime(r.expires_at)}`,
+      wide: true,
+      body: `
+        <div class="detail-grid">
+          <div class="detail"><div class="k">Hospital</div><div class="v">${esc(r.hospital_name)}, ${esc(r.hospital_city)}</div></div>
+          <div class="detail"><div class="k">Hospital phone</div><div class="v">${r.hospital_contact ? `<a href="tel:${esc(r.hospital_contact)}">${esc(r.hospital_contact)}</a>` : '—'}</div></div>
+          <div class="detail"><div class="k">Requested by</div><div class="v">${personCell(requester, r.requester_id)}</div></div>
+          <div class="detail"><div class="k">Requester phone</div><div class="v">${requester?.phone ? `<a href="tel:${esc(requester.phone)}">${esc(requester.phone)}</a>` : '—'}</div></div>
+          <div class="detail"><div class="k">Urgency</div><div class="v">${esc(titleCase(r.urgency_level))}</div></div>
+          <div class="detail"><div class="k">Status</div><div class="v">${statusBadge(isExpired(r) ? 'expired' : r.status)}</div></div>
+        </div>
+        <div class="section-title">Donors alerted (${esc(alerts.length)})</div>
+        ${alerts.length ? `<div class="list-rows">${alerts.map((a) => {
+    const d = donors[a.donor_id];
+    return `<div class="list-row"><span>🐾</span><div class="grow"><div class="cell-main">${esc(d?.pet_name || 'Donor')}</div>
+          <div class="cell-sub">${esc(d ? `${d.blood_group} · ${d.city}` : '')}${a.responded_at ? ` · answered ${esc(ago(a.responded_at))}` : ''}</div></div>
+          ${canContact && d?.emergency_contact ? `<a class="btn btn-ghost btn-sm" href="tel:${esc(d.emergency_contact)}">📞 ${esc(d.emergency_contact)}</a>` : ''}
+          ${statusBadge(a.status)}</div>`;
+  }).join('')}</div>` : '<p class="note" style="margin:0">No donors were alerted. There may have been no eligible donor nearby.</p>'}`,
+      foot: can('blood.manage') && r.status === 'active'
+        ? '<button class="btn btn-danger-outline" data-action="m" data-id="close">Close request</button>' : '',
+      handlers: {
+        close: async (btn) => {
+          const ok = await confirmBox({ title: 'Close this request?', message: 'Donors stop seeing it. Use this for duplicates, tests, or when the family says it is resolved.', confirmLabel: 'Close request', tone: 'danger', field: { label: 'Reason', required: true } });
+          if (ok == null) return;
+          await busy(btn, async () => {
+            await act('blood_request.close', r.id, { reason: ok });
+            toast('Request closed.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
+
+  async function renderCalls() {
+    const rows = await q(sb.from('donor_contact_escalations').select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    escalationRows = rows;
+    const reqIds = [...new Set(rows.map((r) => r.request_id).filter(Boolean))];
+    const donorIds = [...new Set(rows.map((r) => r.donor_id).filter(Boolean))];
+    const requests = {};
+    const donors = {};
+    if (reqIds.length) (await sb.from('blood_requests').select('id, pet_name, blood_group, hospital_name, hospital_city, status').in('id', reqIds)).data?.forEach((x) => { requests[x.id] = x; });
+    if (donorIds.length) (await sb.from('blood_donors').select(`id, pet_name, blood_group, city${can('blood.contact') ? ', emergency_contact' : ''}`).in('id', donorIds)).data?.forEach((x) => { donors[x.id] = x; });
+    const people = await profilesFor(rows.flatMap((r) => [r.requester_id, r.donor_user_id]));
+    rows.forEach((r) => { r._req = requests[r.request_id]; r._donor = donors[r.donor_id]; r._requester = people[r.requester_id]; r._owner = people[r.donor_user_id]; });
+
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[r.status] = (counts[r.status] || 0) + 1; });
+    const s = state.blood.status;
+    const list = s === 'all' ? rows : s === 'done'
+      ? rows.filter((r) => ['closed', 'donor_declined', 'unreachable'].includes(r.status))
+      : rows.filter((r) => r.status === s);
+    counts.done = (counts.closed || 0) + (counts.donor_declined || 0) + (counts.unreachable || 0);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Asked</th><th>For</th><th>Donor to call</th><th>Requester</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((r) => `<tr>
+        <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+        <td>${r._req ? `<div class="cell-main">${esc(r._req.pet_name)} <span class="badge b-red">${esc(r._req.blood_group)}</span></div><div class="cell-sub">${esc(r._req.hospital_name)}, ${esc(r._req.hospital_city)}</div>` : '<span class="cell-sub">Request removed</span>'}</td>
+        <td><div class="cell-main">${esc(r._donor?.pet_name || 'Donor')}</div><div class="cell-sub">${r._donor?.emergency_contact ? `<a href="tel:${esc(r._donor.emergency_contact)}">📞 ${esc(r._donor.emergency_contact)}</a>` : esc(r._owner?.full_name || '')}</div></td>
+        <td>${personCell(r._requester, r.requester_id, r._requester?.phone || undefined)}</td>
+        <td>${statusBadge(r.status)}${r.staff_note ? `<div class="cell-sub cell-clip">${esc(r.staff_note)}</div>` : ''}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="edit-call" data-id="${esc(r.id)}">Update</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📞', s === 'open' ? 'No call requests waiting' : 'Nothing here', 'When a requester cannot reach a donor in the app, they can ask the team to call. Those requests land here.');
+
+    return `<div class="toolbar">${tabsHtml('blood', 'status', [['open', 'Open'], ['contacted', 'Contacted'], ['done', 'Done'], ['all', 'All']], s, counts)}</div>
+      <div class="card">${table}</div>
+      ${can('blood.contact') ? '' : '<p class="note">Phone numbers are shown only to roles with the blood.contact permission.</p>'}`;
+  }
+
+  ACTIONS['edit-call'] = (id) => {
+    const r = escalationRows.find((x) => x.id === id);
+    if (!r) return;
+    openModal({
+      title: 'Update call request',
+      subtitle: r._req ? `${r._req.pet_name} · ${r._req.blood_group} · ${r._req.hospital_name}` : '',
+      body: `
+        ${r.note ? `<div class="field"><label>Requester’s note</label><div class="quote">${esc(r.note)}</div></div>` : ''}
+        <div class="field"><label for="callStatus">Outcome</label>
+          <select class="select" id="callStatus">${[['open', 'Open — not called yet'], ['contacted', 'Contacted — donor is helping'], ['donor_declined', 'Donor declined'], ['unreachable', 'Could not reach donor'], ['closed', 'Closed']]
+    .map(([v, l]) => `<option value="${v}" ${v === r.status ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+        <div class="field"><label for="callNote">Staff note</label>
+          <textarea class="textarea" id="callNote" placeholder="Who you spoke to, what was agreed">${esc(r.staff_note || '')}</textarea></div>
+        ${r.handled_by ? `<p class="note" style="margin:0">Last updated by ${esc(r.handled_by)} ${esc(ago(r.handled_at))}.</p>` : ''}`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>',
+      handlers: {
+        save: async (btn) => {
+          await busy(btn, async () => {
+            await act('escalation.update', r.id, { status: $('#callStatus').value, staff_note: $('#callNote').value.trim() || null });
+            closeModal();
+            toast('Call request updated.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
+
+  async function renderDonors() {
+    const contact = can('blood.contact');
+    const rows = await q(sb.from('blood_donors')
+      .select(`id, pet_name, species, breed, blood_group, city, area, is_available, last_donation_at, user_id, created_at${contact ? ', emergency_contact' : ''}`)
+      .order('created_at', { ascending: false }).limit(500));
+    const people = await profilesFor(rows.map((d) => d.user_id));
+    const resting = (d) => d.last_donation_at && (Date.now() - new Date(d.last_donation_at)) < 90 * 864e5;
+    const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Donor</th><th>Blood group</th><th>City</th><th>Availability</th><th class="hide-sm">Owner</th>${contact ? '<th>Contact</th>' : ''}</tr></thead><tbody>
+      ${rows.map((d) => `<tr>
+        <td><div class="cell-main">${esc(d.pet_name)}</div><div class="cell-sub">${esc(d.breed || titleCase(d.species))}</div></td>
+        <td><span class="badge b-red">${esc(d.blood_group)}</span></td>
+        <td>${esc(d.city)}${d.area ? `<div class="cell-sub">${esc(d.area)}</div>` : ''}</td>
+        <td>${resting(d) ? `${badge('Resting', 'amber')}<div class="cell-sub">until ${esc(fmtDate(new Date(new Date(d.last_donation_at).getTime() + 90 * 864e5)))}</div>` : d.is_available ? badge('Available', 'green') : badge('Paused', 'slate')}</td>
+        <td class="hide-sm">${personCell(people[d.user_id], d.user_id)}</td>
+        ${contact ? `<td>${d.emergency_contact ? `<a href="tel:${esc(d.emergency_contact)}">${esc(d.emergency_contact)}</a>` : '—'}</td>` : ''}
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🐾', 'No registered donors', 'Pets registered as blood donors in the app appear here.');
+    return `<div class="card">${table}</div>`;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Home banners
+  // ════════════════════════════════════════════════════════════════════════════
+  let bannerRows = [];
+
+  function bannerState(b) {
+    const now = Date.now();
+    if (!b.is_active) return ['Draft', 'slate'];
+    if (b.starts_at && new Date(b.starts_at) > now) return ['Scheduled', 'blue'];
+    if (b.ends_at && new Date(b.ends_at) < now) return ['Ended', 'slate'];
+    return ['Live', 'green'];
+  }
+
+  function bannerPreview(b) {
+    const img = safeUrl(b.image_url);
+    const bg = /^#[0-9a-f]{3,8}$/i.test(b.background_color || '') ? b.background_color : '#142C73';
+    const fg = /^#[0-9a-f]{3,8}$/i.test(b.text_color || '') ? b.text_color : '#FFFFFF';
+    return `<div class="banner-preview" style="background-color:${bg};${img ? `background-image:url('${esc(img)}');` : ''}color:${fg}">
+      <h4>${esc(b.title || 'Banner title')}</h4>${b.subtitle ? `<p>${esc(b.subtitle)}</p>` : ''}
+      ${b.cta_text ? `<span class="cta">${esc(b.cta_text)}</span>` : ''}</div>`;
+  }
+
+  RENDER.banners = async () => {
+    const rows = await q(sb.from('promo_banners').select('*').order('sort_order', { ascending: true }).order('created_at', { ascending: false }));
+    bannerRows = rows;
+    const live = rows.filter((b) => bannerState(b)[0] === 'Live').length;
+    const grid = rows.length ? `<div class="banner-grid">${rows.map((b) => {
+      const [label, tone] = bannerState(b);
+      return `<div class="card banner-card">${bannerPreview(b)}
+        <div class="banner-meta">${badge(label, tone)}<span class="cell-sub">#${esc(b.sort_order ?? 0)}${b.ends_at ? ` · until ${esc(fmtDate(b.ends_at))}` : ''}</span>
+          <span class="actions"><button class="btn btn-outline btn-sm" data-action="edit-banner" data-id="${esc(b.id)}">Edit</button>
+          <button class="btn btn-ghost btn-sm" data-action="delete-banner" data-id="${esc(b.id)}">Delete</button></span></div></div>`;
+    }).join('')}</div>`
+      : `<div class="card">${emptyHtml('🖼️', 'No banners', 'With no live banners the app shows no carousel at all. Add one to promote an offer or product.')}</div>`;
+    return `<div class="toolbar"><p class="cell-sub grow">${esc(live)} live · lower numbers show first. Only offers that really exist in the shop should go here.</p>
+      <button class="btn btn-primary" data-action="edit-banner" data-id="new">+ New banner</button></div>${grid}`;
+  };
+
+  const toLocalInput = (v) => {
+    if (!v) return '';
+    const d = new Date(v);
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  ACTIONS['edit-banner'] = (id) => {
+    const b = id === 'new'
+      ? { title: '', subtitle: '', image_url: '', cta_text: 'Shop now', route_url: '/shop', background_color: '#142C73', text_color: '#FFFFFF', sort_order: (bannerRows.length + 1) * 10, is_active: false }
+      : { ...bannerRows.find((x) => x.id === id) };
+    if (!b) return;
+
+    const read = () => ({
+      title: $('#bnTitle').value.trim(),
+      subtitle: $('#bnSubtitle').value.trim() || null,
+      image_url: $('#bnImage').value.trim(),
+      cta_text: $('#bnCta').value.trim() || null,
+      route_url: $('#bnRoute').value.trim() || null,
+      background_color: $('#bnBg').value,
+      text_color: $('#bnFg').value,
+      sort_order: Number($('#bnOrder').value) || 0,
+      is_active: $('#bnActive').checked,
+      starts_at: $('#bnStart').value ? new Date($('#bnStart').value).toISOString() : null,
+      ends_at: $('#bnEnd').value ? new Date($('#bnEnd').value).toISOString() : null,
+    });
+
+    openModal({
+      title: id === 'new' ? 'New banner' : 'Edit banner',
+      wide: true,
+      body: `
+        <div id="bnPreview" class="banner-edit-preview">${bannerPreview(b)}</div>
+        <div class="field-row">
+          <div class="field"><label for="bnTitle">Title *</label><input class="input" id="bnTitle" maxlength="60" value="${esc(b.title)}"></div>
+          <div class="field"><label for="bnSubtitle">Subtitle</label><input class="input" id="bnSubtitle" maxlength="90" value="${esc(b.subtitle || '')}"></div>
+        </div>
+        <div class="field"><label for="bnFile">Image *</label>
+          <div class="image-drop"><img id="bnThumb" src="${esc(safeUrl(b.image_url))}" alt="" ${safeUrl(b.image_url) ? '' : 'hidden'}>
+            <div class="grow"><input type="file" id="bnFile" accept="image/png,image/jpeg,image/webp">
+            <div class="hint">PNG, JPG or WebP, up to 2 MB. Wide images (about 2.2 : 1) look best.</div></div></div>
+          <input class="input" id="bnImage" placeholder="…or paste an https:// image URL" value="${esc(b.image_url || '')}" style="margin-top:8px"></div>
+        <div class="field-row">
+          <div class="field"><label for="bnCta">Button text</label><input class="input" id="bnCta" maxlength="24" value="${esc(b.cta_text || '')}"></div>
+          <div class="field"><label for="bnRoute">Opens</label><input class="input" id="bnRoute" value="${esc(b.route_url || '')}" placeholder="/shop or /shop/product/<id>">
+            <span class="hint">An app screen path, e.g. /shop</span></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="bnBg">Background colour</label><input class="input" type="color" id="bnBg" value="${esc(b.background_color || '#142C73')}" style="height:42px;padding:4px"></div>
+          <div class="field"><label for="bnFg">Text colour</label><input class="input" type="color" id="bnFg" value="${esc(b.text_color || '#FFFFFF')}" style="height:42px;padding:4px"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="bnStart">Show from</label><input class="input" type="datetime-local" id="bnStart" value="${esc(toLocalInput(b.starts_at))}"></div>
+          <div class="field"><label for="bnEnd">Show until</label><input class="input" type="datetime-local" id="bnEnd" value="${esc(toLocalInput(b.ends_at))}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="bnOrder">Order</label><input class="input" type="number" id="bnOrder" value="${esc(b.sort_order ?? 0)}"></div>
+          <div class="field" style="justify-content:flex-end"><label class="check"><input type="checkbox" id="bnActive" ${b.is_active ? 'checked' : ''}> Active (shown in the app)</label></div>
+        </div>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save banner</button>',
+      handlers: {
+        save: async (btn) => {
+          const fields = read();
+          if (!fields.title) { toast('Add a title.', 'warning'); return; }
+          if (!safeUrl(fields.image_url)) { toast('Add an image (upload one or paste an https:// URL).', 'warning'); return; }
+          if (fields.starts_at && fields.ends_at && fields.ends_at <= fields.starts_at) { toast('“Show until” must be after “Show from”.', 'warning'); return; }
+          await busy(btn, async () => {
+            await act('banner.save', id, { banner: fields });
+            closeModal();
+            toast('Banner saved.', 'success');
+            renderCurrent();
+          });
+        },
+      },
+    });
+
+    const repaint = () => { $('#bnPreview').innerHTML = bannerPreview(read()); };
+    ['bnTitle', 'bnSubtitle', 'bnCta', 'bnBg', 'bnFg', 'bnImage'].forEach((f) => document.getElementById(f).addEventListener('input', repaint));
+    const setThumb = (url) => { $('#bnThumb').src = url; $('#bnThumb').hidden = !url; };
+    $('#bnImage').addEventListener('change', () => setThumb(safeUrl($('#bnImage').value.trim())));
+    $('#bnFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { toast('Use a PNG, JPG or WebP image.', 'warning'); return; }
+      if (file.size > 2 * 1024 * 1024) { toast('That image is over 2 MB. Please use a smaller one.', 'warning'); return; }
+      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[file.type];
+      const path = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
+      toast('Uploading image…');
+      const { error } = await sb.storage.from('promo-banners').upload(path, file, { contentType: file.type, upsert: false });
+      if (error) { toast('Could not upload the image.', 'error'); return; }
+      // Record who uploaded it (the Storage policy already required
+      // banners.manage for the upload itself).
+      act('banner.image_uploaded', 'new', { path }).catch(() => {});
+      const { data } = sb.storage.from('promo-banners').getPublicUrl(path);
+      $('#bnImage').value = data.publicUrl;
+      setThumb(data.publicUrl);
+      repaint();
+      toast('Image uploaded.', 'success');
+    });
+  };
+
+  ACTIONS['delete-banner'] = async (id, btn) => {
+    const b = bannerRows.find((x) => x.id === id);
+    if (!b) return;
+    const ok = await confirmBox({ title: `Delete “${b.title}”?`, message: 'It disappears from the app. This cannot be undone — to hide it for now, edit it and turn Active off instead.', confirmLabel: 'Delete', tone: 'danger' });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      await act('banner.delete', id);
+      toast('Banner deleted.', 'success');
+      renderCurrent();
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Notifications (announcements)
+  // ════════════════════════════════════════════════════════════════════════════
+  // Screens an announcement may open. The database (announcement_link_ok) and
+  // the app accept only these.
+  const ANNOUNCE_LINKS = [
+    ['', 'Notifications inbox'],
+    ['/home', 'Home'],
+    ['/shop', 'Shop'],
+    ['/pet-match', 'Pet Match'],
+    ['/pet-care', 'Pet Care'],
+    ['/blood-bank', 'Blood bank'],
+    ['/pet-services', 'Pet services'],
+    ['/my-pet', 'My pets'],
+    ['/subscriptions', 'Subscriptions'],
+    ['/home/loyalty', 'Paw Points'],
+  ];
+  const AUDIENCES = [
+    ['all', 'Everyone'],
+    ['city', 'People in one city'],
+    ['donors', 'Registered blood donors'],
+    ['user', 'One person'],
+  ];
+  const GROUP_LIMIT = 3;
+  const blankAnnouncement = () => ({ title: '', body: '', audience: 'all', audience_value: '', link: '' });
+  let announceDraft = blankAnnouncement();
+
+  function audienceLabel(a, v) {
+    if (a === 'city') return `People in ${v || '?'}`;
+    if (a === 'user') return `One person (${v || '?'})`;
+    return (AUDIENCES.find(([k]) => k === a) || [a, titleCase(a)])[1];
+  }
+
+  function pushPreview(d) {
+    return `<div class="push-preview"><div class="push-head"><span class="push-app">🐾</span><span>Doggy Ji</span><span class="grow"></span><span>now</span></div>
+      <div class="push-title">${esc(d.title || 'Title')}</div><div class="push-body">${esc(d.body || 'Your message appears here.')}</div></div>`;
+  }
+
+  RENDER.announce = async () => {
+    const rows = await q(sb.from('admin_broadcasts').select('*').order('created_at', { ascending: false }).limit(50));
+    const dayAgo = Date.now() - 864e5;
+    const used = rows.filter((r) => r.audience !== 'user' && r.status !== 'failed' && new Date(r.created_at) > dayAgo).length;
+    const d = announceDraft;
+    const opt = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+
+    const form = `<div class="card card-pad">
+      <div class="field-row">
+        <div class="field"><label for="anAudience">Send to</label><select class="select" id="anAudience">${opt(AUDIENCES, d.audience)}</select></div>
+        <div class="field" id="anValueField" ${d.audience === 'city' || d.audience === 'user' ? '' : 'hidden'}>
+          <label for="anValue" id="anValueLabel">${d.audience === 'user' ? 'Username or user id' : 'City'}</label>
+          <input class="input" id="anValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? '@username' : 'e.g. Bengaluru'}"></div>
+      </div>
+      <div class="field"><label for="anTitle">Title * <span class="cell-sub" id="anTitleCount"></span></label>
+        <input class="input" id="anTitle" maxlength="65" value="${esc(d.title)}" placeholder="e.g. New: Ragi Shots Mini"></div>
+      <div class="field"><label for="anBody">Message * <span class="cell-sub" id="anBodyCount"></span></label>
+        <textarea class="textarea" id="anBody" maxlength="240" placeholder="What do you want people to know?">${esc(d.body)}</textarea></div>
+      <div class="field"><label for="anLink">Tapping it opens</label><select class="select" id="anLink">${opt(ANNOUNCE_LINKS, d.link)}</select></div>
+      <p class="cell-sub" id="anReach">Check the reach before sending.</p>
+      <div class="toolbar" style="margin:12px 0 0">
+        <button class="btn btn-outline" data-action="announce-preview">Check reach</button>
+        <span class="grow"></span>
+        <button class="btn btn-primary" data-action="announce-send">Send announcement</button>
+      </div>
+      <p class="note">Group announcements used in the last 24 hours: ${esc(used)} of ${GROUP_LIMIT}. Messages to one person are not limited.
+        People who turned off “News &amp; announcements” in the app get the inbox message without a push. Suspended accounts get nothing.</p>
+    </div>`;
+
+    const preview = `<div class="card card-pad"><div class="section-title" style="margin-top:0">Preview</div><div id="anPreview">${pushPreview(d)}</div>
+      <p class="note">Every recipient also finds it in the app under Notifications, even if the push does not reach their phone.</p></div>`;
+
+    const history = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Sent</th><th>Announcement</th><th>Audience</th><th>Reach</th><th>Status</th><th class="hide-sm">By</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr>
+        <td class="nowrap">${esc(fmtDateTime(r.created_at))}</td>
+        <td><div class="cell-main">${esc(r.title)}</div><div class="cell-sub">${esc(r.body)}</div></td>
+        <td>${esc(audienceLabel(r.audience, r.audience_value))}</td>
+        <td class="nowrap">${esc(r.recipients)} in inbox<div class="cell-sub">${esc(r.delivered)} of ${esc(r.devices)} phones${r.failed ? ` · ${esc(r.failed)} failed` : ''}</div></td>
+        <td>${badge(titleCase(r.status), { sent: 'green', sending: 'amber', failed: 'red' }[r.status] || 'slate')}</td>
+        <td class="hide-sm cell-sub">${esc(r.sent_by)}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📣', 'Nothing sent yet', 'Announcements you send appear here with how many people they reached.');
+
+    return `<div class="grid-2">${form}${preview}</div><div class="section-title">Sent</div><div class="card">${history}</div>`;
+  };
+
+  function readAnnouncement() {
+    announceDraft = {
+      title: $('#anTitle').value.trim(),
+      body: $('#anBody').value.trim(),
+      audience: $('#anAudience').value,
+      audience_value: $('#anValue').value.trim(),
+      link: $('#anLink').value,
+    };
+    return announceDraft;
+  }
+
+  function announcementProblem(d) {
+    if (!d.title) return 'Add a title.';
+    if (!d.body) return 'Add a message.';
+    if (d.audience === 'city' && !d.audience_value) return 'Enter the city.';
+    if (d.audience === 'user' && !d.audience_value) return 'Enter the username or user id.';
     return null;
   }
 
-  createSupabase();
-
-  // ── 1. ACTIVE STAFF ROLES & PERMISSIONS DEFINITION ──────────────────────────
-  const ROLES = {
-    super_admin: {
-      title: 'Super Administrator',
-      empId: 'EMP-00001',
-      name: 'Rahul V.',
-      email: 'admin@doggyji.com',
-      permissions: ['*']
-    },
-    verification_officer: {
-      title: 'Provider Verification Officer',
-      empId: 'EMP-00027',
-      name: 'Priya S.',
-      email: 'priya.s@doggyji.com',
-      permissions: [
-        'dashboard.view',
-        'providers.view',
-        'providers.review',
-        'providers.documents.view',
-        'providers.approve',
-        'providers.reject',
-        'providers.request_changes'
-      ]
-    },
-    operations_manager: {
-      title: 'Operations Manager',
-      empId: 'EMP-00034',
-      name: 'Arun K.',
-      email: 'arun.k@doggyji.com',
-      permissions: [
-        'dashboard.view',
-        'providers.view',
-        'providers.suspend',
-        'bookings.view',
-        'bookings.manage',
-        'bookings.refund',
-        'blood.view',
-        'blood.manage',
-        'users.view',
-        'audit.view'
-      ]
-    },
-    support_agent: {
-      title: 'Customer Support Specialist',
-      empId: 'EMP-00049',
-      name: 'Ananya M.',
-      email: 'ananya.m@doggyji.com',
-      permissions: [
-        'dashboard.view',
-        'providers.view',
-        'bookings.view',
-        'bookings.manage',
-        'users.view'
-      ]
-    },
-    blood_sos_manager: {
-      title: 'Blood SOS Coordinator',
-      empId: 'EMP-00015',
-      name: 'Dr. Vikram',
-      email: 'vikram.v@doggyji.com',
-      permissions: [
-        'dashboard.view',
-        'blood.view',
-        'blood.manage'
-      ]
-    }
-  };
-
-  let currentRoleKey = 'super_admin';
-  let currentStaff = ROLES[currentRoleKey];
-
-  function hasPermission(perm) {
-    if (!currentStaff) return false;
-    if (currentStaff.permissions.includes('*')) return true;
-    return currentStaff.permissions.includes(perm);
-  }
-
-  function enforcePermission(perm, actionDescription) {
-    if (!hasPermission(perm)) {
-      emitAuditEvent({
-        eventName: 'admin.permission.denied',
-        targetType: 'system_security',
-        targetId: perm,
-        targetName: actionDescription,
-        beforeState: {},
-        afterState: {},
-        reasonCode: 'permission_missing',
-        reasonNotes: `Actor attempted unauthorized action [${actionDescription}] requiring permission [${perm}].`,
-        result: 'DENIED'
-      });
-
-      showToast(`Access Denied: Your role (${currentStaff.title}) lacks permission '${perm}'.`, 'danger');
-      return false;
-    }
-    return true;
-  }
-
-  // ── 2. AUTHENTICATION & SESSION MANAGEMENT ───────────────────────────────────
-  const loginScreen = document.getElementById('loginScreen');
-  const adminAppLayout = document.getElementById('adminAppLayout');
-  const loginForm = document.getElementById('loginForm');
-  const loginEmail = document.getElementById('loginEmail');
-  const loginPassword = document.getElementById('loginPassword');
-  const togglePasswordBtn = document.getElementById('togglePasswordBtn');
-  const signOutBtn = document.getElementById('signOutBtn');
-
-  /// Restores a session only if Supabase still holds a valid one.
-  ///
-  /// This used to trust localStorage alone, so editing one key in devtools
-  /// opened the portal. Server-side RLS meant no data followed, but the shell
-  /// opened, which is misleading about who is let in. The stored payload is now
-  /// only a UI hint; the Supabase session is what decides.
-  async function checkExistingSession() {
-    try {
-      if (!supabaseClient) { showLoginScreen(); return false; }
-
-      const { data: { session } } = await supabaseClient.auth.getSession();
-      if (!session || !session.user) {
-        localStorage.removeItem('doggyji_admin_session');
-        showLoginScreen();
-        return false;
-      }
-
-      const { data: staffRow } = await supabaseClient
-        .from('admin_users')
-        .select('employee_id, email, full_name, role_id, status')
-        .ilike('email', session.user.email || '')
-        .maybeSingle();
-
-      if (!staffRow || staffRow.status !== 'active') {
-        await supabaseClient.auth.signOut();
-        localStorage.removeItem('doggyji_admin_session');
-        showLoginScreen();
-        return false;
-      }
-
-      establishStaffSession(staffRow);
-      return true;
-    } catch (e) {
-      console.warn('Session restore failed:', e);
-      showLoginScreen();
-      return false;
-    }
-  }
-
-  function showLoginScreen() {
-    if (adminAppLayout) adminAppLayout.style.display = 'none';
-    if (loginScreen) loginScreen.style.display = 'flex';
-  }
-
-  function establishSession(roleKey, emitAudit = true) {
-    currentRoleKey = roleKey;
-    currentStaff = ROLES[roleKey];
-
-
-    localStorage.setItem('doggyji_admin_session', JSON.stringify({
-      role: currentRoleKey,
-      empId: currentStaff.empId,
-      name: currentStaff.name,
-      email: currentStaff.email,
-      timestamp: Date.now()
-    }));
-
-    applySessionToUi(emitAudit);
-  }
-
-  /// Paints the shell for the current session and announces it.
-  function applySessionToUi(emitAudit) {
-    // Update Top App Bar indicators
-    const roleBadge = document.getElementById('activeRoleBadge');
-    if (roleBadge) roleBadge.textContent = currentStaff.title;
-    const roleNameEl = document.getElementById('activeRoleName');
-    if (roleNameEl) roleNameEl.textContent = currentStaff.title;
-    const empIdEl = document.getElementById('activeEmpId');
-    if (empIdEl) empIdEl.textContent = `${currentStaff.empId} • ${currentStaff.name}`;
-
-    // Switch view visibility
-    if (loginScreen) loginScreen.style.display = 'none';
-    if (adminAppLayout) adminAppLayout.style.display = 'flex';
-
-    if (emitAudit) {
-      emitAuditEvent({
-        eventName: 'admin.login.success',
-        targetType: 'admin_sessions',
-        targetId: currentStaff.empId,
-        targetName: `Session established for ${currentStaff.name}`,
-        beforeState: null,
-        afterState: { role: currentRoleKey, email: currentStaff.email },
-        reasonCode: 'credentials_verified',
-        reasonNotes: 'Authenticated into DoggyJi Enterprise Administration Portal',
-        result: 'SUCCESS'
-      });
-      showToast(`Welcome back, ${currentStaff.name}! Active persona: ${currentStaff.title}`, 'success');
-    }
-
-    // Refresh views
-    fetchLiveSupabaseData();
-  }
-
-
-  /// Starts a session from the authenticated admin_users row.
-  ///
-  /// The role is whatever the database says; ROLES is now only a source of
-  /// display labels, never of privilege. Server-side, every query is gated by
-  /// is_admin()/admin_has(), so a tampered localStorage grants a nicer-looking
-  /// sidebar and no additional data.
-  function establishStaffSession(staffRow) {
-    const roleKey = ROLES[staffRow.role_id] ? staffRow.role_id : 'support_agent';
-    currentRoleKey = roleKey;
-    currentStaff = Object.assign({}, ROLES[roleKey], {
-      empId: staffRow.employee_id,
-      name: staffRow.full_name,
-      email: staffRow.email
-    });
-
-    localStorage.setItem('doggyji_admin_session', JSON.stringify({
-      role: roleKey,
-      empId: staffRow.employee_id,
-      name: staffRow.full_name,
-      email: staffRow.email,
-      timestamp: Date.now()
-    }));
-
-    applySessionToUi(true);
-  }
-
-  // Handle Login Form Submit
-  //
-  // This used to destructure `error` from signInWithPassword, never check it,
-  // catch any exception with a log saying "Auth bypassed", and then call
-  // establishSession() unconditionally. Any email with any password logged you
-  // in — and an unrecognised email defaulted to super_admin. The page also
-  // shipped with a real-looking email and password pre-filled in the HTML, so
-  // anyone opening the link was handed working "credentials" for a door that
-  // was not locked.
-  //
-  // Authentication is now Supabase Auth, and the role comes from the
-  // admin_users table rather than from whatever the client claims.
-  if (loginForm) {
-    loginForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const email = loginEmail.value.trim().toLowerCase();
-      const pwd = loginPassword.value;
-
-      if (!email || !pwd) {
-        showToast('Please enter your email and password.', 'warning');
-        return;
-      }
-      if (!supabaseClient) {
-        showToast('Cannot reach the server. Check the connection settings.', 'error');
-        return;
-      }
-
-      const submitBtn = loginForm.querySelector('button[type="submit"]');
-      if (submitBtn) { submitBtn.disabled = true; submitBtn.dataset.label = submitBtn.textContent; submitBtn.textContent = 'Signing in…'; }
-
-      const restore = () => {
-        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = submitBtn.dataset.label || 'Sign In'; }
-      };
-
-      try {
-        const { data, error } = await supabaseClient.auth.signInWithPassword({
-          email, password: pwd
-        });
-
-        if (error || !data || !data.session) {
-          // Deliberately not distinguishing "no such account" from "wrong
-          // password": that difference tells an attacker which emails are staff.
-          showToast('Incorrect email or password.', 'error');
-          restore();
-          return;
-        }
-
-        // Authenticating proves who you are, not that you are staff. The
-        // admin_users row decides that, and RLS only lets you read your own.
-        const { data: staffRow, error: staffErr } = await supabaseClient
-          .from('admin_users')
-          .select('employee_id, email, full_name, role_id, status')
-          .ilike('email', email)
-          .maybeSingle();
-
-        if (staffErr || !staffRow) {
-          await supabaseClient.auth.signOut();
-          showToast('This account does not have admin access.', 'error');
-          restore();
-          return;
-        }
-        if (staffRow.status !== 'active') {
-          await supabaseClient.auth.signOut();
-          showToast(`This staff account is ${staffRow.status}.`, 'error');
-          restore();
-          return;
-        }
-
-        establishStaffSession(staffRow);
-        restore();
-      } catch (err) {
-        console.error('Sign-in failed:', err);
-        showToast('Could not sign in. Please try again.', 'error');
-        restore();
-      }
-    });
-  }
-
-  // Password Visibility Toggle
-  if (togglePasswordBtn && loginPassword) {
-    togglePasswordBtn.addEventListener('click', () => {
-      const isPwd = loginPassword.type === 'password';
-      loginPassword.type = isPwd ? 'text' : 'password';
-      togglePasswordBtn.textContent = isPwd ? '🙈' : '👁️';
-    });
-  }
-
-  // Sign Out Handler
-  if (signOutBtn) {
-    signOutBtn.addEventListener('click', () => {
-      emitAuditEvent({
-        eventName: 'admin.session.revoked',
-        targetType: 'admin_sessions',
-        targetId: currentStaff ? currentStaff.empId : 'ANON',
-        targetName: 'Session logged out',
-        beforeState: null,
-        afterState: null,
-        reasonCode: 'user_signout',
-        reasonNotes: 'User explicitly terminated administrative session',
-        result: 'SUCCESS'
-      });
-
-      localStorage.removeItem('doggyji_admin_session');
-      if (supabaseClient) {
-        supabaseClient.auth.signOut().catch(() => {});
-      }
-
-      showLoginScreen();
-      showToast('You have been signed out.', 'info');
-    });
-  }
-
-  // ── 3. STATE STORE (LIVE SUPABASE MIRROR) ──────────────────────────────────
-  let providers = [];
-  let bookings = [];
-  let bloodRequests = [];
-  let donors = [];
-  let employees = [];
-  let auditLogs = [];
-
-
-  function emitAuditEvent({ eventName, targetType, targetId, targetName, beforeState, afterState, reasonCode, reasonNotes, result = 'SUCCESS' }) {
-    const reqId = 'REQ-' + Math.random().toString(36).substring(2, 7).toUpperCase();
-    const now = new Date();
-    const formattedDate = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' + 
-                          now.toLocaleTimeString('en-GB', { hour12: false }) + ' IST';
-
-    const auditEntry = {
-      id: 'AUD-' + (auditLogs.length + 1).toString().padStart(3, '0'),
-      eventName,
-      actor: {
-        employee_id: currentStaff ? currentStaff.empId : 'EMP-00001',
-        name: currentStaff ? currentStaff.name : 'System Admin',
-        role: currentStaff ? currentStaff.title : 'Super Administrator',
-        session_origin: window.location.origin
-      },
-      authorization: {
-        permission_used: eventName.replace(/\./g, '_'),
-        decision: result === 'DENIED' ? 'deny' : 'allow'
-      },
-      target: {
-        type: targetType,
-        id: targetId,
-        name: targetName
-      },
-      change: {
-        before: beforeState,
-        after: afterState
-      },
-      context: {
-        request_id: reqId,
-        environment: 'production'
-      },
-      business: {
-        reason_code: reasonCode,
-        reason_text: reasonNotes
-      },
-      result,
-      timestamp: formattedDate
+  AFTER.announce = () => {
+    const counts = () => {
+      $('#anTitleCount').textContent = `${$('#anTitle').value.length}/65`;
+      $('#anBodyCount').textContent = `${$('#anBody').value.length}/240`;
     };
-
-    // Append to local state
-    auditLogs.unshift(auditEntry);
-    renderAuditTable();
-    updateDashboardMetrics();
-
-    // Persist to Supabase live table if available
-    if (supabaseClient) {
-      supabaseClient.from('admin_audit_logs').insert([{
-        event_name: auditEntry.eventName,
-        actor: auditEntry.actor,
-        authorization: auditEntry.authorization,
-        target: auditEntry.target,
-        change: auditEntry.change,
-        context: auditEntry.context,
-        business: auditEntry.business,
-        result: auditEntry.result
-      }]).then(({ error }) => {
-        if (error) console.info('Live Supabase audit log insert notice:', error.message);
-      }).catch(err => console.warn('Supabase audit insert notice:', err));
-    }
-
-    return auditEntry;
-  }
-
-  // ── 5. LIVE SUPABASE SYNC & DATA FETCHING ───────────────────────────────────
-  async function fetchLiveSupabaseData() {
-    if (!supabaseClient) return;
-
-    try {
-      const connEl = document.getElementById('connStatus');
-      if (connEl) {
-        connEl.innerHTML = `<div class="conn-dot online"></div><span>Live Syncing...</span>`;
-      }
-
-      // 1. Fetch live service_providers
-      const { data: provData, error: provError } = await supabaseClient
-        .from('service_providers')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!provError && provData) {
-        providers = provData.map(p => ({
-          id: p.id,
-          fullName: p.full_name || 'Provider',
-          city: p.city || 'Bengaluru',
-          area: p.area || 'Central',
-          services: p.service_types && p.service_types.length ? p.service_types : ['Dog Walker'],
-          experienceYears: p.years_experience || 0,
-          quizPassed: p.safety_quiz_passed || false,
-          policeVerified: p.police_verified || false,
-          status: p.verification_status || 'pending',
-          submittedDate: new Date(p.created_at || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-          bio: p.bio || 'Pet care professional',
-          aadhaarLast4: 'XXXX'
-        }));
-        renderProvidersTable();
-      }
-
-      // 2. Fetch live service_bookings with joined customer profile & provider name
-      const { data: bkData, error: bkError } = await supabaseClient
-        .from('service_bookings')
-        .select(`
-          id,
-          customer_id,
-          provider_id,
-          service_type,
-          booking_date,
-          time_slot,
-          total_price,
-          status,
-          pet_id,
-          created_at,
-          service_providers!provider_id ( full_name )
-        `)
-        .order('created_at', { ascending: false });
-
-      if (!bkError && bkData) {
-        // Also fetch customer display names from profiles
-        const customerIds = [...new Set(bkData.map(b => b.customer_id).filter(Boolean))];
-        let profileMap = {};
-        if (customerIds.length) {
-          const { data: profileData } = await supabaseClient
-            .from('profiles')
-            .select('id, full_name, display_name')
-            .in('id', customerIds);
-          if (profileData) {
-            profileData.forEach(p => {
-              profileMap[p.id] = p.full_name || p.display_name || null;
-            });
-          }
-        }
-
-        // Also fetch pet names for bookings that have a pet_id
-        const petIds = [...new Set(bkData.map(b => b.pet_id).filter(Boolean))];
-        let petMap = {};
-        if (petIds.length) {
-          const { data: petsData } = await supabaseClient
-            .from('pets')
-            .select('id, name')
-            .in('id', petIds);
-          if (petsData) {
-            petsData.forEach(p => { petMap[p.id] = p.name; });
-          }
-        }
-
-        bookings = bkData.map(b => {
-          const customerName = profileMap[b.customer_id]
-            || (b.customer_id ? `ID: ${b.customer_id.substring(0, 8)}…` : 'Unknown Customer');
-          const providerName = b.service_providers?.full_name
-            || (b.provider_id ? `ID: ${b.provider_id.substring(0, 8)}…` : 'Unassigned');
-          const petName = b.pet_id ? (petMap[b.pet_id] || `Pet ${b.pet_id.substring(0, 6)}`) : '—';
-          return {
-            id: b.id,
-            customerName,
-            petName,
-            providerName,
-            serviceType: b.service_type || 'Pet Care',
-            date: b.booking_date || 'Today',
-            slot: b.time_slot || 'Standard',
-            totalPrice: `₹${b.total_price || '0.00'}`,
-            status: b.status || 'pending'
-          };
-        });
-        renderBookingsTable();
-      }
-
-      // 3. Fetch live blood_requests
-      const { data: bloodData, error: bloodError } = await supabaseClient
-        .from('blood_requests')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!bloodError && bloodData) {
-        bloodRequests = bloodData.map(r => ({
-          id: r.id,
-          petName: r.pet_name || 'Emergency Pet',
-          species: r.species || 'Canine',
-          bloodGroup: r.blood_group || 'DEA 1.1+',
-          hospitalName: r.hospital_name || 'Veterinary Clinic',
-          city: r.hospital_city || 'Bengaluru',
-          urgencyLevel: (r.urgency_level || 'critical').toUpperCase(),
-          status: r.status || 'active',
-          createdDate: new Date(r.created_at || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-        }));
-        renderBloodRequestsTable();
-      }
-
-      // 4. Fetch live admin staff (admin_users)
-      const { data: staffData, error: staffError } = await supabaseClient
-        .from('admin_users')
-        .select('*')
-        .order('created_at', { ascending: true });
-
-      if (!staffError && staffData) {
-        employees = staffData.map(s => ({
-          empId: s.employee_id || 'EMP-00001',
-          name: s.full_name || 'Staff Member',
-          email: s.email || 'staff@doggyji.com',
-          role: (s.role_id || 'super_admin').replace(/_/g, ' ').toUpperCase(),
-          status: (s.status || 'active').toUpperCase(),
-          mfa: s.mfa_enabled !== false,
-          lastLogin: s.last_login_at ? new Date(s.last_login_at).toLocaleString('en-GB') : 'Active Session'
-        }));
-        renderEmployeesTable();
-      }
-
-      // 5. Fetch live audit logs
-      const { data: auditData, error: auditError } = await supabaseClient
-        .from('admin_audit_logs')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!auditError && auditData) {
-        auditLogs = auditData.map(a => ({
-          id: a.id.substring(0, 8),
-          eventName: a.event_name,
-          actor: a.actor || {},
-          authorization: a.authorization || {},
-          target: a.target || {},
-          change: a.change || {},
-          context: a.context || { request_id: 'REQ-LIVE' },
-          business: a.business || {},
-          result: a.result || 'SUCCESS',
-          timestamp: new Date(a.created_at).toLocaleString('en-GB') + ' IST'
-        }));
-        renderAuditTable();
-      }
-
-      // 6. Fetch live blood donors — join with pets table for real pet name & breed
-      const { data: donorData, error: donorError } = await supabaseClient
-        .from('blood_donors')
-        .select('*, pets ( name, breed, species )');
-
-      if (!donorError && donorData) {
-        donors = donorData.map(d => ({
-          name: d.pets?.name || `Donor (${d.id?.substring(0, 6)}…)`,
-          breed: d.pets?.breed || d.pets?.species || d.species || 'Canine',
-          bloodGroup: d.blood_group,
-          city: d.city,
-          distanceKm: 'Nearby',
-          contact: d.emergency_contact || '—'
-        }));
-      }
-
-      if (connEl) {
-        connEl.innerHTML = `<div class="conn-dot online"></div><span>Live Supabase</span>`;
-        connEl.title = `Connected to ${SUPABASE_URL}`;
-      }
-      updateDashboardMetrics();
-    } catch (e) {
-      console.warn('Error fetching live data from Supabase:', e);
-    }
-  }
-
-  // Populate Real Test Data into Supabase
-  async function seedLiveSupabaseData() {
-    if (!supabaseClient) {
-      showToast('Supabase client not initialized.', 'warning');
-      return;
-    }
-
-    showToast('Inserting real test applicant records into Supabase database...', 'info');
-
-    try {
-      // 1. Insert service providers
-      const seedProviders = [
-        {
-          user_id: 'test_user_vikram_' + Date.now().toString().slice(-4),
-          full_name: 'Vikram Dogra',
-          city: 'Bengaluru',
-          area: 'Indiranagar',
-          bio: 'Certified canine handler with 4 years experience caring for Indie and Labrador breeds.',
-          years_experience: 4,
-          safety_quiz_passed: true,
-          police_verified: true,
-          service_types: ['dogWalker', 'daycare'],
-          verification_status: 'pending'
-        },
-        {
-          user_id: 'test_user_anjali_' + Date.now().toString().slice(-4),
-          full_name: 'Anjali Rao',
-          city: 'Hyderabad',
-          area: 'Banjara Hills',
-          bio: 'Lifelong pet foster parent with a spacious bungalow and safe fenced yard.',
-          years_experience: 6,
-          safety_quiz_passed: true,
-          police_verified: false,
-          service_types: ['homeBoarding'],
-          verification_status: 'pending'
-        },
-        {
-          user_id: 'test_user_rohit_' + Date.now().toString().slice(-4),
-          full_name: 'Rohit Sharma',
-          city: 'Mumbai',
-          area: 'Bandra West',
-          bio: 'Active runner and dog lover providing structured high-energy walks.',
-          years_experience: 2,
-          safety_quiz_passed: true,
-          police_verified: true,
-          service_types: ['dogWalker'],
-          verification_status: 'pending'
-        }
-      ];
-
-      const { data: insertedProvs, error: provErr } = await supabaseClient
-        .from('service_providers')
-        .insert(seedProviders)
-        .select();
-
-      if (provErr) {
-        console.warn('Notice seeding providers (check RLS):', provErr.message);
-      } else {
-        console.log('Inserted real providers into Supabase:', insertedProvs);
-      }
-
-      // Re-fetch live data from Supabase
-      await fetchLiveSupabaseData();
-      showToast('Live Supabase database successfully refreshed with test rows!', 'success');
-    } catch (e) {
-      showToast('Error seeding database: ' + e.message, 'danger');
-    }
-  }
-
-  // ── 6. RENDERERS ─────────────────────────────────────────────────────────────
-
-  function renderProvidersTable(filter = 'all', query = '') {
-    const tbody = document.getElementById('providersTableBody');
-    if (!tbody) return;
-
-    let list = providers;
-    if (filter !== 'all') {
-      list = list.filter(p => p.status === filter);
-    }
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter(p => p.fullName.toLowerCase().includes(q) || p.city.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
-    }
-
-    if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding: 32px; color: var(--text-muted);">No provider applications matching criteria.</td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = list.map(p => {
-      let statusBadge = '';
-      if (p.status === 'approved') statusBadge = '<span class="badge-status badge-approved">✓ Approved</span>';
-      else if (p.status === 'pending') statusBadge = '<span class="badge-status badge-pending">⏳ Pending Review</span>';
-      else if (p.status === 'changes_requested') statusBadge = '<span class="badge-status badge-changes">⚠️ Changes Requested</span>';
-      else if (p.status === 'rejected') statusBadge = '<span class="badge-status badge-rejected">✕ Rejected</span>';
-      else if (p.status === 'suspended') statusBadge = '<span class="badge-status badge-suspended">🛑 Suspended</span>';
-
-      return `
-        <tr>
-          <td>
-            <strong>${esc(p.fullName)}</strong><br>
-            <small style="color:var(--text-muted)">${esc(p.id)}</small>
-          </td>
-          <td>
-            ${esc(p.city)} (${esc(p.area)})<br>
-            <small style="color:var(--doggy-teal); font-weight:600;">${esc((p.services || []).join(', '))}</small>
-          </td>
-          <td>${esc(p.experienceYears)} Years</td>
-          <td>
-            ${p.quizPassed ? '<span title="Safety Quiz Passed" style="color:var(--doggy-green); font-weight:600;">✓ Quiz</span>' : '<span style="color:var(--text-muted)">✗ Quiz</span>'}
-            ${p.policeVerified ? ' • <span title="Police Verified" style="color:var(--doggy-teal); font-weight:600;">🛡️ Police</span>' : ''}
-          </td>
-          <td>${statusBadge}</td>
-          <td>${esc(p.submittedDate)}</td>
-          <td>
-            <button class="btn btn-sm btn-primary" data-action="review-provider" data-id="${attr(p.id)}">Review Application →</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    const pendingCount = providers.filter(p => p.status === 'pending').length;
-    const badgeEl = document.getElementById('pendingProvidersCount');
-    if (badgeEl) badgeEl.textContent = pendingCount;
-
-    // Update filter pill counts dynamically
-    const pAll = document.getElementById('pillCountAll');
-    if (pAll) pAll.textContent = `(${providers.length})`;
-    const pPending = document.getElementById('pillCountPending');
-    if (pPending) pPending.textContent = `(${pendingCount})`;
-    const pChanges = document.getElementById('pillCountChanges');
-    if (pChanges) pChanges.textContent = `(${providers.filter(p => p.status === 'changes_requested').length})`;
-    const pApproved = document.getElementById('pillCountApproved');
-    if (pApproved) pApproved.textContent = `(${providers.filter(p => p.status === 'approved').length})`;
-    const pSuspended = document.getElementById('pillCountSuspended');
-    if (pSuspended) pSuspended.textContent = `(${providers.filter(p => p.status === 'suspended').length})`;
-  }
-
-  function renderBookingsTable(filter = 'all', query = '') {
-    const tbody = document.getElementById('bookingsTableBody');
-    if (!tbody) return;
-
-    let list = bookings;
-    if (filter !== 'all') {
-      list = list.filter(b => b.status === filter);
-    }
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter(b => b.customerName.toLowerCase().includes(q) || b.providerName.toLowerCase().includes(q) || b.id.toLowerCase().includes(q));
-    }
-
-    if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">📅</div><strong>No service bookings recorded in Supabase database yet.</strong><br><small>Bookings made via the mobile app will appear here in real-time.</small></td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = list.map(b => {
-      let statusBadge = '';
-      if (b.status === 'confirmed') statusBadge = '<span class="badge-status badge-approved">Confirmed</span>';
-      else if (b.status === 'pending') statusBadge = '<span class="badge-status badge-pending">Pending</span>';
-      else if (b.status === 'completed') statusBadge = '<span class="badge-status badge-approved">Completed</span>';
-      else if (b.status === 'cancelled') statusBadge = '<span class="badge-status badge-rejected">Cancelled</span>';
-
-      return `
-        <tr>
-          <td><strong>${esc(b.id)}</strong></td>
-          <td>${esc(b.customerName)}<br><small style="color:var(--text-muted)">${esc(b.petName)}</small></td>
-          <td><strong>${esc(b.providerName)}</strong></td>
-          <td>${esc(b.serviceType)}</td>
-          <td>${esc(b.date)}<br><small style="color:var(--text-secondary)">${esc(b.slot)}</small></td>
-          <td><strong>${esc(b.totalPrice)}</strong></td>
-          <td>${statusBadge}</td>
-          <td>
-            <button class="btn btn-sm btn-outline" data-action="booking-override" data-id="${attr(b.id)}">Admin Override</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
-  }
-
-  function renderBloodRequestsTable() {
-    const tbody = document.getElementById('bloodRequestsTableBody');
-    if (!tbody) return;
-
-    if (bloodRequests.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">🚨</div><strong>No emergency blood requests in Supabase database.</strong><br><small>Emergency SOS alerts created from the app will stream here.</small></td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = bloodRequests.map(r => `
-      <tr>
-        <td><strong>${esc(r.petName)}</strong><br><small style="color:var(--text-muted)">${esc(r.species)}</small></td>
-        <td><strong style="color:var(--doggy-red); font-size:14px;">${esc(r.bloodGroup)}</strong></td>
-        <td>${esc(r.hospitalName)}</td>
-        <td>${esc(r.city)}</td>
-        <td><span class="badge-status ${r.urgencyLevel === 'CRITICAL' ? 'badge-rejected' : 'badge-pending'}">${esc(r.urgencyLevel)}</span></td>
-        <td><span class="badge-status badge-approved">${esc(String(r.status || '').toUpperCase())}</span></td>
-        <td>${esc(r.createdDate)}</td>
-        <td>
-          <button class="btn btn-sm btn-danger" data-action="blood-dispatch" data-id="${attr(r.id)}">🚨 Dispatch Donors</button>
-        </td>
-      </tr>
-    `).join('');
-  }
-
-  function renderEmployeesTable() {
-    const tbody = document.getElementById('employeesTableBody');
-    if (!tbody) return;
-
-    if (employees.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">👥</div><strong>No administrative staff accounts found in Supabase.</strong></td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = employees.map(e => `
-      <tr>
-        <td><code>${esc(e.empId)}</code></td>
-        <td><strong>${esc(e.name)}</strong></td>
-        <td>${esc(e.email)}</td>
-        <td><span class="badge-status badge-changes">${esc(e.role)}</span></td>
-        <td><span class="badge-status badge-approved">${esc(e.status)}</span></td>
-        <td>${e.mfa ? '✓ Protected' : '⚠️ Disabled'}</td>
-        <td>${esc(e.lastLogin)}</td>
-        <td>
-          <button class="btn btn-sm btn-outline" onclick="showToast('Role permissions are centrally managed.', 'info')">Edit Role</button>
-        </td>
-      </tr>
-    `).join('');
-  }
-
-  function renderAuditTable(moduleFilter = 'all', resultFilter = 'all', query = '') {
-    const tbody = document.getElementById('auditTableBody');
-    if (!tbody) return;
-
-    let list = auditLogs;
-    if (moduleFilter !== 'all') {
-      list = list.filter(a => a.eventName.startsWith(moduleFilter));
-    }
-    if (resultFilter !== 'all') {
-      list = list.filter(a => a.result === resultFilter);
-    }
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter(a => a.eventName.toLowerCase().includes(q) || 
-                              (a.actor && a.actor.name && a.actor.name.toLowerCase().includes(q)) || 
-                              (a.context && a.context.request_id && a.context.request_id.toLowerCase().includes(q)));
-    }
-
-    if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 40px; color: var(--text-muted);"><div style="font-size:24px; margin-bottom:6px;">📜</div><strong>No audit log entries recorded in Supabase database yet.</strong><br><small>Administrative and security actions will append immutable ledger rows here.</small></td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = list.map(a => {
-      let resBadge = '';
-      if (a.result === 'SUCCESS') resBadge = '<span class="badge-status badge-approved">SUCCESS</span>';
-      else if (a.result === 'DENIED') resBadge = '<span class="badge-status badge-rejected">DENIED</span>';
-      else resBadge = '<span class="badge-status badge-changes">FAILURE</span>';
-
-      return `
-        <tr>
-          <td><small style="color:var(--text-muted)">${esc(a.timestamp)}</small></td>
-          <td><strong>${esc(a.actor?.name || 'Staff')}</strong><br><small style="color:var(--text-secondary)">${esc(a.actor?.employee_id || 'EMP')}</small></td>
-          <td><code>${esc(a.eventName)}</code></td>
-          <td><span style="color:var(--doggy-teal); font-weight:600;">${esc(a.target?.type)}</span></td>
-          <td>${esc(a.target?.id)}</td>
-          <td>${resBadge}</td>
-          <td><code>${esc(a.context ? a.context.request_id : 'REQ')}</code></td>
-          <td>
-            <button class="btn btn-sm btn-outline" data-action="inspect-audit" data-id="${attr(a.id)}">Inspect 🔍</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
-  }
-
-  function updateDashboardMetrics() {
-    const approved = providers.filter(p => p.status === 'approved').length;
-    const pending = providers.filter(p => p.status === 'pending').length;
-    const activeBk = bookings.filter(b => b.status === 'confirmed' || b.status === 'pending').length;
-    const activeSos = bloodRequests.filter(r => r.status === 'active').length;
-
-    const elApproved = document.getElementById('dashApprovedProviders');
-    if (elApproved) elApproved.textContent = approved;
-    const elPending = document.getElementById('dashPendingProviders');
-    if (elPending) elPending.textContent = pending;
-    const elBk = document.getElementById('dashActiveBookings');
-    if (elBk) elBk.textContent = activeBk;
-    const elSos = document.getElementById('dashActiveSos');
-    if (elSos) elSos.textContent = activeSos;
-    const elAudit = document.getElementById('dashAuditCount');
-    if (elAudit) elAudit.textContent = auditLogs.length;
-    const elStaff = document.getElementById('dashStaffCount');
-    if (elStaff) elStaff.textContent = employees.length;
-
-    // Sidebar counter badges
-    const badgePending = document.getElementById('pendingProvidersCount');
-    if (badgePending) badgePending.textContent = pending;
-    const badgeBk = document.getElementById('activeBookingsCount');
-    if (badgeBk) badgeBk.textContent = activeBk;
-    const badgeSos = document.getElementById('activeBloodSosCount');
-    if (badgeSos) badgeSos.textContent = activeSos;
-  }
-
-  // ── 7. CHARTS INITIALIZATION ────────────────────────────────────────────────
-  let opsChartInstance = null;
-  let auditChartInstance = null;
-
-  function initCharts() {
-    const ctxOps = document.getElementById('opsVelocityChart');
-    if (ctxOps) {
-      opsChartInstance = new Chart(ctxOps, {
-        type: 'line',
-        data: {
-          labels: ['14 Sep', '15 Sep', '16 Sep', '17 Sep', '18 Sep', '19 Sep', '20 Sep'],
-          datasets: [
-            {
-              label: 'Provider Verifications',
-              data: [3, 5, 2, 8, 4, 7, 9],
-              borderColor: '#23C1C3',
-              backgroundColor: 'rgba(35, 193, 195, 0.1)',
-              tension: 0.4,
-              fill: true
-            },
-            {
-              label: 'Booking Operations',
-              data: [8, 12, 10, 15, 18, 14, 22],
-              borderColor: '#7B1FA2',
-              backgroundColor: 'rgba(123, 31, 162, 0.1)',
-              tension: 0.4,
-              fill: true
-            }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: { legend: { labels: { color: '#94A3B8', font: { family: 'Montserrat' } } } },
-          scales: {
-            x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#94A3B8' } },
-            y: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#94A3B8' } }
-          }
-        }
-      });
-    }
-
-    const ctxAudit = document.getElementById('auditDistributionChart');
-    if (ctxAudit) {
-      auditChartInstance = new Chart(ctxAudit, {
-        type: 'doughnut',
-        data: {
-          labels: ['Providers', 'Bookings', 'Security/Auth', 'Blood SOS'],
-          datasets: [{
-            data: [45, 30, 15, 10],
-            backgroundColor: ['#23C1C3', '#7B1FA2', '#EF4444', '#FEBB4A'],
-            borderWidth: 0
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: { position: 'bottom', labels: { color: '#94A3B8', font: { family: 'Montserrat' } } }
-          }
-        }
-      });
-    }
-  }
-
-  // ── 8. NAVIGATION & TAB SWITCHING ───────────────────────────────────────────
-  const navItems = document.querySelectorAll('.nav-item');
-  const views = document.querySelectorAll('.content-view');
-
-  window.navigateTo = function(targetViewId) {
-    navItems.forEach(item => {
-      if (item.getAttribute('data-view') === targetViewId) item.classList.add('active');
-      else item.classList.remove('active');
-    });
-
-    views.forEach(v => {
-      if (v.id === `view-${targetViewId}`) v.classList.add('active');
-      else v.classList.remove('active');
-    });
-
-    const titleMap = {
-      'dashboard': ['Command Center', 'Real-time platform operations and security telemetry'],
-      'providers': ['Provider Verification Queue', 'Two-layer review of identity, credentials, and verification status'],
-      'bookings': ['Bookings & Operations Overrides', 'Administrative scheduling, slot integrity, and emergency overrides'],
-      'blood-sos': ['Blood SOS Dispatch Command', 'Emergency candidate matching and hospital coordination under strict privacy'],
-      'employees': ['Staff Directory & RBAC Roles', 'Principle of least privilege and staff authorization management'],
-      'audit-logs': ['Immutable Audit Subsystem', 'Strictly append-only historical audit trail for forensic investigation'],
-      'security': ['Security & Anomaly Signals', 'Real-time detection of suspicious volume, privilege escalations, and denials']
+    const repaint = () => {
+      const d = readAnnouncement();
+      $('#anPreview').innerHTML = pushPreview(d);
+      counts();
     };
-
-    if (titleMap[targetViewId]) {
-      document.getElementById('pageTitle').textContent = titleMap[targetViewId][0];
-      document.getElementById('pageSubtitle').textContent = titleMap[targetViewId][1];
-    }
+    ['anTitle', 'anBody', 'anValue', 'anLink'].forEach((f) => document.getElementById(f).addEventListener('input', repaint));
+    $('#anAudience').addEventListener('change', () => {
+      const a = $('#anAudience').value;
+      $('#anValueField').hidden = !(a === 'city' || a === 'user');
+      $('#anValueLabel').textContent = a === 'user' ? 'Username or user id' : 'City';
+      $('#anValue').placeholder = a === 'user' ? '@username' : 'e.g. Bengaluru';
+      $('#anValue').value = '';
+      $('#anReach').textContent = 'Check the reach before sending.';
+      readAnnouncement();
+    });
+    counts();
   };
 
-  navItems.forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      const targetView = item.getAttribute('data-view');
-      navigateTo(targetView);
+  async function announcementReach(d) {
+    const r = await act('broadcast.preview', 'new', { broadcast: d });
+    return { people: Number(r?.recipients ?? 0), phones: Number(r?.push_recipients ?? 0) };
+  }
+
+  ACTIONS['announce-preview'] = async (_, btn) => {
+    const d = readAnnouncement();
+    if ((d.audience === 'city' || d.audience === 'user') && !d.audience_value) { toast(announcementProblem(d), 'warning'); return; }
+    await busy(btn, async () => {
+      const { people, phones } = await announcementReach(d);
+      $('#anReach').textContent = people
+        ? `Reaches ${people} ${people === 1 ? 'person' : 'people'} in the inbox; ${phones} of them get a push on their phone.`
+        : 'Nobody matches this audience.';
     });
-  });
-
-  // The header used to carry a "persona" dropdown that called
-  // establishSession() with whatever role was picked — letting anyone promote
-  // themselves to Super Admin from the UI. Roles now come from admin_users and
-  // are enforced by admin_has() in the database, so the control is gone rather
-  // than merely disabled.
-
-
-  // ── 9. PROVIDER VERIFICATION REVIEW MODAL ACTIONS ───────────────────────────
-  let selectedProviderId = null;
-
-  window.openProviderReviewModal = function(providerId) {
-    if (!enforcePermission('providers.review', 'Review Provider Application')) return;
-
-    selectedProviderId = providerId;
-    const prov = providers.find(p => p.id === providerId);
-    if (!prov) return;
-
-    document.getElementById('reviewModalTitle').textContent = `Review: ${prov.fullName}`;
-    document.getElementById('reviewModalSubtitle').textContent = `ID: ${prov.id} • Submitted: ${prov.submittedDate}`;
-    document.getElementById('reviewFullName').textContent = prov.fullName;
-    document.getElementById('reviewCityArea').textContent = `${prov.city}, ${prov.area}`;
-    document.getElementById('reviewServices').textContent = `${prov.experienceYears} Years • ${prov.services.join(', ')}`;
-    document.getElementById('reviewChecks').textContent = `✓ Safety Quiz: ${prov.quizPassed ? 'Passed (100%)' : 'Pending'} • Police Certificate: ${prov.policeVerified ? 'Verified' : 'None'}`;
-    document.getElementById('reviewBio').textContent = prov.bio;
-
-    openModal('providerReviewModal');
   };
 
-  window.triggerDocumentViewAudit = function() {
-    if (!enforcePermission('providers.documents.view', 'View Sensitive KYC Document')) return;
-
-    emitAuditEvent({
-      eventName: 'provider.document.viewed',
-      targetType: 'provider_documents',
-      targetId: selectedProviderId,
-      targetName: `Aadhaar Card (${selectedProviderId})`,
-      beforeState: null,
-      afterState: null,
-      reasonCode: 'verification_review',
-      reasonNotes: 'Decrypted and reviewed government identity document for applicant verification',
-      result: 'SUCCESS'
+  ACTIONS['announce-send'] = async (_, btn) => {
+    const d = readAnnouncement();
+    const problem = announcementProblem(d);
+    if (problem) { toast(problem, 'warning'); return; }
+    const reach = await busy(btn, () => announcementReach(d));
+    if (!reach) return;
+    if (!reach.people) { toast('Nobody matches this audience.', 'warning'); return; }
+    const ok = await confirmBox({
+      title: `Send to ${reach.people} ${reach.people === 1 ? 'person' : 'people'}?`,
+      message: `“${d.title}” goes to ${audienceLabel(d.audience, d.audience_value).toLowerCase()}: ${reach.people} in the inbox, ${reach.phones} with a push. It cannot be recalled once sent.`,
+      confirmLabel: 'Send now',
     });
-
-    showToast('Secure signed URL generated. Decrypted document view recorded in audit trail.', 'success');
+    if (ok == null) return;
+    await busy(btn, async () => {
+      const r = await act('broadcast.send', 'new', { broadcast: d });
+      if (r?.push_error) toast(r.push_error, 'warning');
+      else toast(`Sent: ${r.recipients} in the inbox, ${r.delivered} of ${r.devices} phones reached.`, 'success');
+      announceDraft = blankAnnouncement();
+      renderCurrent();
+    });
   };
 
-  // Provider Decision Handlers (Approve, Reject, Request Changes)
-  document.getElementById('btnApproveProvider')?.addEventListener('click', async () => {
-    if (!enforcePermission('providers.approve', 'Approve Provider Application')) return;
+  // ════════════════════════════════════════════════════════════════════════════
+  // Orders (read-only)
+  // ════════════════════════════════════════════════════════════════════════════
+  let orderRows = [];
 
-    const prov = providers.find(p => p.id === selectedProviderId);
-    if (!prov) return;
-
-    const beforeState = { verification_status: prov.status, is_verified: prov.status === 'approved' };
-    prov.status = 'approved';
-    const afterState = { verification_status: 'approved', is_verified: true };
-
-    const reasonCode = document.getElementById('reviewReasonCode').value;
-    const notes = document.getElementById('reviewNotes').value || 'All safety and identity checks completed.';
-
-    const outcome = await callAdminAction('provider.approve', prov.id, { reason: notes });
-    if (!outcome.ok) {
-      // The local copy was optimistically flipped above; put it back.
-      prov.status = beforeState.verification_status;
-      showToast(`Could not approve ${prov.fullName}: ${outcome.error}`, 'error');
-      renderProvidersTable();
-      return;
-    }
-
-    emitAuditEvent({
-      eventName: 'provider.approved',
-      targetType: 'service_providers',
-      targetId: prov.id,
-      targetName: prov.fullName,
-      beforeState,
-      afterState,
-      reasonCode,
-      reasonNotes: notes,
-      result: 'SUCCESS'
-    });
-
-    closeModal('providerReviewModal');
-    renderProvidersTable();
-    showToast(`Provider ${prov.fullName} has been approved and verified in database!`, 'success');
-  });
-
-  document.getElementById('btnRejectProvider')?.addEventListener('click', async () => {
-    if (!enforcePermission('providers.reject', 'Reject Provider Application')) return;
-
-    const prov = providers.find(p => p.id === selectedProviderId);
-    if (!prov) return;
-
-    const reasonCode = document.getElementById('reviewReasonCode').value;
-    const notes = document.getElementById('reviewNotes').value;
-
-    if (!notes.trim()) {
-      showToast('Rejection requires mandatory explanation notes.', 'warning');
-      return;
-    }
-
-    const beforeState = { verification_status: prov.status };
-    prov.status = 'rejected';
-    const afterState = { verification_status: 'rejected' };
-
-    const outcome = await callAdminAction('provider.reject', prov.id, { reason: notes });
-    if (!outcome.ok) {
-      prov.status = beforeState.verification_status;
-      showToast(`Could not reject ${prov.fullName}: ${outcome.error}`, 'error');
-      renderProvidersTable();
-      return;
-    }
-
-    emitAuditEvent({
-      eventName: 'provider.rejected',
-      targetType: 'service_providers',
-      targetId: prov.id,
-      targetName: prov.fullName,
-      beforeState,
-      afterState,
-      reasonCode,
-      reasonNotes: notes,
-      result: 'SUCCESS'
-    });
-
-    closeModal('providerReviewModal');
-    renderProvidersTable();
-    showToast(`Provider ${prov.fullName} application rejected. Recorded in audit trail.`, 'danger');
-  });
-
-  document.getElementById('btnRequestChangesProvider')?.addEventListener('click', async () => {
-    if (!enforcePermission('providers.request_changes', 'Request Provider KYC Changes')) return;
-
-    const prov = providers.find(p => p.id === selectedProviderId);
-    if (!prov) return;
-
-    const notes = document.getElementById('reviewNotes').value;
-    if (!notes.trim()) {
-      showToast('Please specify the changes required from the applicant.', 'warning');
-      return;
-    }
-
-    const beforeState = { verification_status: prov.status };
-    prov.status = 'changes_requested';
-    const afterState = { verification_status: 'changes_requested' };
-
-    emitAuditEvent({
-      eventName: 'provider.changes_requested',
-      targetType: 'service_providers',
-      targetId: prov.id,
-      targetName: prov.fullName,
-      beforeState,
-      afterState,
-      reasonCode: document.getElementById('reviewReasonCode').value,
-      reasonNotes: notes,
-      result: 'SUCCESS'
-    });
-
-    closeModal('providerReviewModal');
-    renderProvidersTable();
-    showToast(`Requested changes from ${prov.fullName}. Notification logged.`, 'warning');
-  });
-
-  // ── 10. BOOKING ACTION OVERRIDE MODAL ────────────────────────────────────────
-  let selectedBookingId = null;
-
-  window.openBookingActionModal = function(bookingId) {
-    if (!enforcePermission('bookings.manage', 'Administrative Booking Override')) return;
-
-    selectedBookingId = bookingId;
-    document.getElementById('bookingModalSubtitle').textContent = `Booking ID: ${bookingId}`;
-    openModal('bookingActionModal');
+  RENDER.orders = async () => {
+    const term = state.orders.q.replace(/[,()%*]/g, ' ').trim();
+    let query = sb.from('orders').select('*').order('placed_at', { ascending: false }).limit(200);
+    if (term) query = query.or(['id', 'shopify_order_id', 'customer_name', 'customer_email', 'customer_phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
+    const rows = await q(query);
+    orderRows = rows;
+    const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Order</th><th>Customer</th><th>Placed</th><th>Total</th><th>Status</th><th class="hide-sm">Account</th><th></th></tr></thead><tbody>
+      ${rows.map((o) => `<tr>
+        <td><div class="cell-main">${esc(o.id)}</div>${o.coupon_code ? `<div class="cell-sub">Coupon ${esc(o.coupon_code)}</div>` : ''}</td>
+        <td><div>${esc(o.customer_name || '—')}</div><div class="cell-sub">${esc(o.customer_email || o.customer_phone || '')}</div></td>
+        <td class="nowrap">${esc(fmtDateTime(o.placed_at))}</td>
+        <td>${esc(money(o.total_amount))}</td>
+        <td>${badge(titleCase(o.status || 'unknown'), 'blue')}</td>
+        <td class="hide-sm">${o.user_id ? badge('Linked', 'teal') : '<span class="cell-sub">Guest</span>'}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-order" data-id="${esc(o.id)}">View</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📦', term ? 'No matching orders' : 'No orders yet', term ? 'Try an order number, name, email or phone.' : 'Shopify orders appear here once the order webhook records them.');
+    return `<div class="toolbar"><input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(state.orders.q)}">
+      <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div><div class="card">${table}</div>`;
   };
 
-  document.getElementById('btnExecuteBookingAction')?.addEventListener('click', async () => {
-    const action = document.getElementById('bookingActionSelect').value;
-    const reason = document.getElementById('bookingActionReason').value;
+  AFTER.orders = () => {
+    const input = document.getElementById('orderSearch');
+    if (!input) return;
+    input.addEventListener('input', debounce(() => {
+      state.orders.q = input.value;
+      renderCurrent().then(() => {
+        const again = document.getElementById('orderSearch');
+        if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+      });
+    }, 400));
+  };
 
-    if (!reason.trim()) {
-      showToast('Administrative overrides require a mandatory reason.', 'warning');
-      return;
-    }
-
-    const bk = bookings.find(b => b.id === selectedBookingId);
-    if (!bk) return;
-
-    const beforeState = { status: bk.status };
-    if (action === 'admin_cancel') bk.status = 'cancelled';
-    else if (action === 'admin_confirm') bk.status = 'confirmed';
-    const afterState = { status: bk.status };
-
-    const outcome = await callAdminAction('booking.set_status', bk.id, {
-      status: bk.status,
-    });
-    if (!outcome.ok) {
-      bk.status = beforeState.status;
-      showToast(`Could not update the booking: ${outcome.error}`, 'error');
-      renderBookingsTable();
-      return;
-    }
-
-    emitAuditEvent({
-      eventName: action === 'admin_cancel' ? 'booking.cancelled' : 'booking.confirmed',
-      targetType: 'service_bookings',
-      targetId: bk.id,
-      targetName: `Booking for ${bk.customerName}`,
-      beforeState,
-      afterState,
-      reasonCode: action,
-      reasonNotes: reason,
-      result: 'SUCCESS'
-    });
-
-    closeModal('bookingActionModal');
-    renderBookingsTable();
-    showToast(`Booking ${bk.id} updated in database. Audit record created.`, 'success');
-  });
-
-  // ── 11. BLOOD SOS DISPATCH MODAL ────────────────────────────────────────────
-  window.openBloodDispatchModal = function(sosId) {
-    if (!enforcePermission('blood.manage', 'Blood SOS Emergency Coordination')) return;
-
-    const req = bloodRequests.find(r => r.id === sosId);
-    if (!req) return;
-
-    document.getElementById('bloodModalSubtitle').textContent = `${req.petName} (${req.species}) • ${req.bloodGroup} Needed at ${req.hospitalName}`;
-    document.getElementById('sosPatientInfo').innerHTML = `
-      <strong>Hospital:</strong> ${esc(req.hospitalName)}, ${esc(req.city)}<br>
-      <strong>Urgency:</strong> <span style="color:var(--doggy-red); font-weight:700;">${esc(req.urgencyLevel)}</span><br>
-      <strong>Status:</strong> Active Emergency
-    `;
-
-    document.getElementById('donorCandidatesList').innerHTML = donors.map(d => `
-      <div style="background:rgba(0,0,0,0.2); padding:10px 14px; border-radius:8px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
-        <div>
-          <strong>${esc(d.name)}</strong><br>
-          <small style="color:var(--doggy-teal)">${esc(d.distanceKm)} away • ${esc(d.bloodGroup)}</small>
+  ACTIONS['open-order'] = async (id) => {
+    const o = orderRows.find((x) => x.id === id);
+    if (!o) return;
+    const { data: items } = await sb.from('order_items').select('*').eq('order_id', o.id);
+    openModal({
+      title: `Order ${o.id}`,
+      subtitle: `Placed ${fmtDateTime(o.placed_at)} · ${titleCase(o.status || '')}`,
+      wide: true,
+      body: `
+        <div class="detail-grid">
+          <div class="detail"><div class="k">Customer</div><div class="v">${esc(o.customer_name || '—')}</div></div>
+          <div class="detail"><div class="k">Contact</div><div class="v">${esc(o.customer_email || '—')}<br>${esc(o.customer_phone || '')}</div></div>
+          <div class="detail full"><div class="k">Ship to</div><div class="quote">${esc(o.shipping_address || '—')}</div></div>
         </div>
-        <button class="btn btn-sm btn-outline" data-action="dispatch-donor" data-id="${attr(d.name)}">Send Alert 📲</button>
-      </div>
-    `).join('');
-
-    openModal('bloodDispatchModal');
+        <div class="section-title">Items</div>
+        ${(items || []).length ? `<div class="list-rows">${items.map((i) => `<div class="list-row"><div class="grow"><div class="cell-main">${esc(i.name)}</div>
+          <div class="cell-sub">${esc(i.pack_name || '')}${i.is_subscription ? ' · subscription' : ''}</div></div>
+          <span>${esc(i.quantity)} × ${esc(money(i.unit_price))}</span></div>`).join('')}</div>` : '<p class="note" style="margin:0">No line items recorded.</p>'}
+        <div class="detail-grid" style="margin-top:14px">
+          <div class="detail"><div class="k">Subtotal</div><div class="v">${esc(money(o.subtotal))}</div></div>
+          <div class="detail"><div class="k">Discount${o.coupon_code ? ` (${esc(o.coupon_code)})` : ''}</div><div class="v">${esc(money(o.discount_amount))}</div></div>
+          <div class="detail"><div class="k">Shipping</div><div class="v">${esc(money(o.shipping_amount))}</div></div>
+          <div class="detail"><div class="k">Total</div><div class="v cell-main">${esc(money(o.total_amount))}</div></div>
+        </div>`,
+    });
   };
 
-  window.dispatchDirectAlert = function(donorName) {
-    emitAuditEvent({
-      eventName: 'blood_sos.donor_dispatched',
-      targetType: 'blood_donors',
-      targetId: donorName,
-      targetName: donorName,
-      beforeState: null,
-      afterState: null,
-      reasonCode: 'critical_sos_matching',
-      reasonNotes: `Direct high-priority alert dispatched to candidate donor: ${donorName}`,
-      result: 'SUCCESS'
-    });
-    showToast(`Dispatched emergency alert to donor: ${donorName}`, 'success');
+  // ════════════════════════════════════════════════════════════════════════════
+  // Staff & roles
+  // ════════════════════════════════════════════════════════════════════════════
+  let staffRows = [];
+  let roleRows = [];
+
+  RENDER.staff = async () => {
+    const [staff, roles, rolePerms, perms] = await Promise.all([
+      q(sb.from('admin_users').select('*').order('created_at', { ascending: true })),
+      q(sb.from('admin_roles').select('*').order('name')),
+      q(sb.from('admin_role_permissions').select('*')),
+      q(sb.from('admin_permissions').select('*').order('id')),
+    ]);
+    staffRows = staff;
+    roleRows = roles;
+    const roleName = Object.fromEntries(roles.map((r) => [r.id, r.name]));
+    const manage = can('employees.manage');
+    const has = new Set(rolePerms.map((rp) => `${rp.role_id}|${rp.permission_id}`));
+
+    const table = `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Staff member</th><th>Role</th><th>Status</th><th class="hide-sm">Login</th><th class="hide-sm">Employee ID</th><th></th></tr></thead><tbody>
+      ${staff.map((s) => `<tr>
+        <td>${personCell({ full_name: s.full_name }, s.id, s.email)}</td>
+        <td>${esc(roleName[s.role_id] || s.role_id)}</td>
+        <td>${s.status === 'active' ? badge('Active', 'green') : statusBadge(s.status)}</td>
+        <td class="hide-sm">${s.auth_user_id ? badge('Linked', 'teal') : badge('No login yet', 'amber')}</td>
+        <td class="hide-sm mono">${esc(s.employee_id)}</td>
+        <td class="actions">${manage && s.id !== me.staff.id ? `<button class="btn btn-outline btn-sm" data-action="edit-staff" data-id="${esc(s.id)}">Edit</button>` : s.id === me.staff.id ? '<span class="cell-sub">You</span>' : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+
+    const matrix = `<div class="table-wrap"><table class="table matrix"><thead><tr><th>Permission</th>${roles.map((r) => `<th>${esc(r.name)}</th>`).join('')}</tr></thead><tbody>
+      ${perms.map((p) => `<tr><td><div class="cell-main mono">${esc(p.id)}</div><div class="cell-sub">${esc(p.description)}</div></td>
+        ${roles.map((r) => `<td>${has.has(`${r.id}|${p.id}`) ? '<span class="yes">✓</span>' : '<span class="no">—</span>'}</td>`).join('')}</tr>`).join('')}
+      </tbody></table></div>`;
+
+    return `<div class="toolbar"><span class="grow"></span>${manage ? '<button class="btn btn-primary" data-action="invite-staff">+ Invite staff member</button>' : ''}</div>
+      <div class="card">${table}</div>
+      <div class="card" style="margin-top:20px"><div class="card-head"><div><h3>What each role can do</h3><p>Enforced by the database and the admin-action function, not by this page.</p></div></div>
+      <div style="padding:8px 0 4px">${matrix}</div></div>`;
   };
 
-  document.getElementById('btnBroadcastSosAlert')?.addEventListener('click', () => {
-    emitAuditEvent({
-      eventName: 'blood_sos.broadcast_dispatched',
-      targetType: 'blood_requests',
-      targetId: 'SOS-901',
-      targetName: 'Rocky (Labrador)',
-      beforeState: null,
-      afterState: null,
-      reasonCode: 'broadcast_all_compatible',
-      reasonNotes: 'Triggered emergency push broadcast to compatible registered blood donors.',
-      result: 'SUCCESS'
+  ACTIONS['invite-staff'] = () => {
+    openModal({
+      title: 'Invite a staff member',
+      body: `
+        <div class="field"><label for="invName">Full name *</label><input class="input" id="invName"></div>
+        <div class="field"><label for="invEmail">Email *</label><input class="input" type="email" id="invEmail"></div>
+        <div class="field"><label for="invRole">Role *</label><select class="select" id="invRole">${roleRows.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}</select></div>
+        <p class="note" style="margin:0">They get an email with a link to set their password. If the email already has a DoggyJi account, it is linked instead and they sign in with their existing password.</p>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="send">Send invite</button>',
+      handlers: {
+        send: async (btn) => {
+          const full_name = $('#invName').value.trim();
+          const email = $('#invEmail').value.trim().toLowerCase();
+          if (!full_name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast('Enter a name and a valid email.', 'warning'); return; }
+          await busy(btn, async () => {
+            const result = await act('staff.invite', 'new', { full_name, email, role_id: $('#invRole').value, redirect_to: location.origin + location.pathname });
+            closeModal();
+            toast(result.invited ? `Invitation sent to ${email}.` : `${email} already had an account — linked. They can sign in now.`, 'success');
+            renderCurrent();
+          });
+        },
+      },
     });
-
-    closeModal('bloodDispatchModal');
-    showToast('Emergency SOS alert broadcast successfully sent to donors!', 'danger');
-  });
-
-  // ── 12. AUDIT DEEP INSPECT DRAWER ───────────────────────────────────────────
-  window.inspectAuditEvent = function(auditId) {
-    if (!enforcePermission('audit.view', 'View Immutable Audit Logs')) return;
-
-    const log = auditLogs.find(a => a.id === auditId);
-    if (!log) return;
-
-    document.getElementById('drawerEventName').textContent = log.eventName;
-    document.getElementById('drawerEventTimestamp').textContent = log.timestamp;
-    document.getElementById('drawerActorName').textContent = `${(log.actor && log.actor.name) || 'Staff'} (${(log.actor && log.actor.employee_id) || 'EMP'})`;
-    document.getElementById('drawerActorRole').textContent = (log.actor && log.actor.role) || 'Staff';
-    document.getElementById('drawerActorIp').textContent = (log.actor && log.actor.ip) || '127.0.0.1';
-    document.getElementById('drawerPermissionUsed').textContent = (log.authorization && log.authorization.permission_used) || 'system';
-
-    document.getElementById('drawerTargetEntity').textContent = (log.target && log.target.type) || 'record';
-    document.getElementById('drawerTargetId').textContent = (log.target && log.target.id) || 'N/A';
-    document.getElementById('drawerRequestId').textContent = (log.context && log.context.request_id) || 'REQ-LIVE';
-    document.getElementById('drawerResult').textContent = log.result;
-    document.getElementById('drawerResult').className = `badge-status-pill ${log.result === 'SUCCESS' ? 'badge-approved' : 'badge-rejected'}`;
-
-    document.getElementById('drawerReasonCode').textContent = (log.business && log.business.reason_code) || 'N/A';
-    document.getElementById('drawerNotes').textContent = `"${(log.business && log.business.reason_text) || 'Operational record'}"`;
-
-    document.getElementById('drawerBeforeJson').textContent = JSON.stringify(log.change ? log.change.before : {}, null, 2);
-    document.getElementById('drawerAfterJson').textContent = JSON.stringify(log.change ? log.change.after : {}, null, 2);
-
-    openDrawer('auditInspectDrawer');
   };
 
-  // Export Audit Logs (JSON)
-  document.getElementById('exportAuditBtn')?.addEventListener('click', () => {
-    if (!enforcePermission('audit.export', 'Export Audit Logs')) return;
-
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(auditLogs, null, 2));
-    const dlAnchorElem = document.createElement('a');
-    dlAnchorElem.setAttribute("href", dataStr);
-    dlAnchorElem.setAttribute("download", `doggyji_audit_logs_${new Date().toISOString().slice(0, 10)}.json`);
-    dlAnchorElem.click();
-
-    emitAuditEvent({
-      eventName: 'audit.exported',
-      targetType: 'compliance_report',
-      targetId: 'ALL_LOGS',
-      targetName: `Count: ${auditLogs.length} events`,
-      beforeState: null,
-      afterState: null,
-      reasonCode: 'compliance_backup',
-      reasonNotes: 'Exported immutable audit logs for external compliance audit.',
-      result: 'SUCCESS'
+  ACTIONS['edit-staff'] = (id) => {
+    const s = staffRows.find((x) => x.id === id);
+    if (!s) return;
+    openModal({
+      title: s.full_name,
+      subtitle: s.email,
+      body: `
+        <div class="field"><label for="stRole">Role</label><select class="select" id="stRole">${roleRows.map((r) => `<option value="${esc(r.id)}" ${r.id === s.role_id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></div>
+        <div class="field"><label for="stStatus">Status</label><select class="select" id="stStatus">${[['active', 'Active'], ['suspended', 'Suspended'], ['disabled', 'Disabled']]
+    .map(([v, l]) => `<option value="${v}" ${v === s.status ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <span class="hint">Suspended or disabled staff cannot use the portal. Their sign-in still works for the app.</span></div>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>',
+      handlers: {
+        save: async (btn) => {
+          const changes = {};
+          if ($('#stRole').value !== s.role_id) changes.role_id = $('#stRole').value;
+          if ($('#stStatus').value !== s.status) changes.status = $('#stStatus').value;
+          if (!Object.keys(changes).length) { closeModal(); return; }
+          await busy(btn, async () => {
+            await act('staff.update', s.id, changes);
+            closeModal();
+            toast('Staff member updated.', 'success');
+            renderCurrent();
+          });
+        },
+      },
     });
+  };
 
-    showToast('Audit logs exported successfully as compliant JSON.', 'success');
-  });
+  // ════════════════════════════════════════════════════════════════════════════
+  // Audit log
+  // ════════════════════════════════════════════════════════════════════════════
+  let auditRows = [];
 
-  // ── 13. BACKEND CONFIG MODAL & LIVE DB ACTIONS ──────────────────────────────
-  const openBackendConfigBtn = document.getElementById('openBackendConfigBtn');
-  const btnSaveBackendConfig = document.getElementById('btnSaveBackendConfig');
-  const btnTestDbConnection = document.getElementById('btnTestDbConnection');
-  const btnSyncLiveSupabase = document.getElementById('btnSyncLiveSupabase');
-  const btnSeedLiveSupabase = document.getElementById('btnSeedLiveSupabase');
+  const auditActor = (a) => a.actor?.name || a.actor?.email || a.actor?.employee_id || 'System';
+  const auditTarget = (a) => [a.target?.type, a.target?.id ? shortId(a.target.id) : null].filter(Boolean).join(' · ') || '—';
 
-  if (openBackendConfigBtn) {
-    openBackendConfigBtn.addEventListener('click', () => {
-      document.getElementById('cfgSupabaseUrl').value = SUPABASE_URL;
-      document.getElementById('cfgSupabaseAnon').value = SUPABASE_ANON_KEY;
-      openModal('backendConfigModal');
+  RENDER.audit = async () => {
+    const rows = await q(sb.from('admin_audit_logs').select('*').order('created_at', { ascending: false }).limit(500));
+    auditRows = rows;
+    const { result, q: term } = state.audit;
+    const t = term.trim().toLowerCase();
+    const list = rows.filter((a) => (result === 'all' || a.result === result) &&
+      (!t || `${a.event_name} ${auditActor(a)} ${a.target?.id || ''} ${a.target?.type || ''}`.toLowerCase().includes(t)));
+    const counts = { all: rows.length };
+    rows.forEach((a) => { counts[a.result] = (counts[a.result] || 0) + 1; });
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>When</th><th>Staff</th><th>Event</th><th class="hide-sm">Target</th><th>Result</th><th></th></tr></thead><tbody>
+      ${list.map((a) => `<tr>
+        <td class="nowrap">${esc(fmtDateTime(a.created_at))}</td>
+        <td><div class="cell-main">${esc(auditActor(a))}</div><div class="cell-sub">${esc(a.actor?.role ? titleCase(a.actor.role) : '')}</div></td>
+        <td class="mono">${esc(a.event_name)}</td>
+        <td class="hide-sm">${esc(auditTarget(a))}</td>
+        <td>${badge(a.result || '—', a.result === 'SUCCESS' ? 'green' : a.result === 'DENIED' ? 'red' : 'amber')}</td>
+        <td class="actions"><button class="btn btn-ghost btn-sm" data-action="open-audit" data-id="${esc(a.id)}">Inspect</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📜', 'No matching entries', 'Staff actions are recorded here as they happen.');
+
+    return `<div class="toolbar">
+        ${tabsHtml('audit', 'result', [['all', 'All'], ['SUCCESS', 'Success'], ['DENIED', 'Denied'], ['FAILURE', 'Failed']], result, counts)}
+        <span class="grow"></span>
+        <input class="input search" id="auditSearch" placeholder="Search event, staff or target" value="${esc(term)}">
+        ${can('audit.export') ? '<button class="btn btn-outline" data-action="export-audit">Export JSON</button>' : ''}
+      </div><div class="card">${table}</div><p class="note">Showing the latest 500 entries. Entries cannot be edited or deleted.</p>`;
+  };
+
+  AFTER.audit = () => {
+    const input = document.getElementById('auditSearch');
+    if (!input) return;
+    input.addEventListener('input', debounce(() => {
+      state.audit.q = input.value;
+      renderCurrent().then(() => {
+        const again = document.getElementById('auditSearch');
+        if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+      });
+    }, 300));
+  };
+
+  ACTIONS['open-audit'] = (id) => {
+    const a = auditRows.find((x) => x.id === id);
+    if (!a) return;
+    openModal({
+      title: a.event_name,
+      subtitle: `${fmtDateTime(a.created_at)} · ${a.result}`,
+      wide: true,
+      body: `<div class="detail-grid">
+          <div class="detail"><div class="k">Staff</div><div class="v">${esc(auditActor(a))}${a.actor?.email ? ` · ${esc(a.actor.email)}` : ''}</div></div>
+          <div class="detail"><div class="k">Target</div><div class="v">${esc(a.target?.type || '—')} <span class="mono">${esc(a.target?.id || '')}</span></div></div>
+          ${a.business?.reason_text ? `<div class="detail full"><div class="k">Reason</div><div class="quote">${esc(a.business.reason_text)}</div></div>` : ''}
+        </div>
+        <div class="section-title">Full record</div><pre class="json">${esc(JSON.stringify(a, null, 2))}</pre>`,
     });
+  };
+
+  ACTIONS['export-audit'] = () => {
+    download(`doggyji-audit-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(auditRows, null, 2));
+    toast(`Exported ${auditRows.length} entries.`, 'success');
+  };
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  async function boot() {
+    themeIcon();
+    if (landingError) {
+      showAuth('signin');
+      toast(`That link did not work: ${landingError}. Ask for a new one.`, 'error');
+      history.replaceState(null, '', location.pathname);
+      return;
+    }
+    const { data: { session } } = await sb.auth.getSession();
+    if (session && (landingType === 'invite' || landingType === 'recovery')) {
+      showAuth('set-password', landingType);
+      return;
+    }
+    if (!session) { showAuth('signin'); return; }
+    await enter(false);
   }
 
-  if (btnSaveBackendConfig) {
-    btnSaveBackendConfig.addEventListener('click', () => {
-      SUPABASE_URL = document.getElementById('cfgSupabaseUrl').value.trim();
-      SUPABASE_ANON_KEY = document.getElementById('cfgSupabaseAnon').value.trim();
-
-      localStorage.setItem('doggyji_cfg_url', SUPABASE_URL);
-      localStorage.setItem('doggyji_cfg_anon', SUPABASE_ANON_KEY);
-      localStorage.removeItem('doggyji_cfg_service_role');
-
-      createSupabase();
-      closeModal('backendConfigModal');
-      fetchLiveSupabaseData();
-      showToast('Database configuration updated and reconnected!', 'success');
-    });
-  }
-
-  if (btnTestDbConnection) {
-    btnTestDbConnection.addEventListener('click', async () => {
-      showToast('Testing connection to Supabase...', 'info');
-      try {
-        const testClient = window.supabase.createClient(
-          document.getElementById('cfgSupabaseUrl').value.trim(),
-          document.getElementById('cfgSupabaseAnon').value.trim()
-        );
-        const { data, error } = await testClient.from('public_blood_donors').select('count');
-        if (error) throw error;
-        showToast('Connection Successful! Database responded 200 OK.', 'success');
-      } catch (e) {
-        showToast('Connection test completed: ' + (e.message || 'Ready'), 'info');
-      }
-    });
-  }
-
-  if (btnSyncLiveSupabase) {
-    btnSyncLiveSupabase.addEventListener('click', () => {
-      fetchLiveSupabaseData();
-      showToast('Triggered live sync with Supabase tables.', 'info');
-    });
-  }
-
-  // ── 14. UI HELPER UTILITIES ──────────────────────────────────────────────────
-  window.openModal = function(modalId) {
-    const el = document.getElementById(modalId);
-    if (el) el.classList.add('open');
-  };
-
-  window.closeModal = function(modalId) {
-    const el = document.getElementById(modalId);
-    if (el) el.classList.remove('open');
-  };
-
-  window.openDrawer = function(drawerId) {
-    const el = document.getElementById(drawerId);
-    if (el) el.classList.add('open');
-  };
-
-  window.closeDrawer = function(drawerId) {
-    const el = document.getElementById(drawerId);
-    if (el) el.classList.remove('open');
-  };
-
-  window.showToast = function(message, type = 'info') {
-    const container = document.getElementById('toastContainer');
-    if (!container) return;
-
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    
-    let icon = 'ℹ️';
-    if (type === 'success') icon = '✓';
-    else if (type === 'danger') icon = '✕';
-    else if (type === 'warning') icon = '⚠️';
-
-    // icon is one of the fixed literals above; message is whatever the caller
-    // passed, which includes database values and backend error strings.
-    toast.innerHTML = `<span>${icon}</span><span>${esc(message)}</span>`;
-    container.appendChild(toast);
-
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      setTimeout(() => toast.remove(), 300);
-    }, 3500);
-  };
-
-  // Theme Toggle
-  const themeToggleBtn = document.getElementById('themeToggleBtn');
-  const themeIcon = document.getElementById('themeIcon');
-  let currentTheme = localStorage.getItem('doggyji_admin_theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', currentTheme);
-  if (themeIcon) themeIcon.textContent = currentTheme === 'dark' ? '☀️' : '🌙';
-
-  if (themeToggleBtn) {
-    themeToggleBtn.addEventListener('click', () => {
-      currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', currentTheme);
-      localStorage.setItem('doggyji_admin_theme', currentTheme);
-      if (themeIcon) themeIcon.textContent = currentTheme === 'dark' ? '☀️' : '🌙';
-    });
-  }
-
-  // Filter Pills Event Binding
-  document.querySelectorAll('#providerFilterPills .filter-pill').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#providerFilterPills .filter-pill').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      renderProvidersTable(btn.getAttribute('data-filter'), document.getElementById('providerSearchInput').value);
-    });
-  });
-
-  document.querySelectorAll('#bookingFilterPills .filter-pill').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#bookingFilterPills .filter-pill').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      renderBookingsTable(btn.getAttribute('data-filter'), document.getElementById('bookingSearchInput').value);
-    });
-  });
-
-  // Search Inputs
-  document.getElementById('providerSearchInput')?.addEventListener('input', (e) => {
-    const activePill = document.querySelector('#providerFilterPills .filter-pill.active');
-    const filter = activePill ? activePill.getAttribute('data-filter') : 'all';
-    renderProvidersTable(filter, e.target.value);
-  });
-
-  document.getElementById('bookingSearchInput')?.addEventListener('input', (e) => {
-    const activePill = document.querySelector('#bookingFilterPills .filter-pill.active');
-    const filter = activePill ? activePill.getAttribute('data-filter') : 'all';
-    renderBookingsTable(filter, e.target.value);
-  });
-
-  document.getElementById('auditSearchInput')?.addEventListener('input', (e) => {
-    renderAuditTable(
-      document.getElementById('auditModuleFilter').value,
-      document.getElementById('auditResultFilter').value,
-      e.target.value
-    );
-  });
-
-  document.getElementById('auditModuleFilter')?.addEventListener('change', (e) => {
-    renderAuditTable(e.target.value, document.getElementById('auditResultFilter').value, document.getElementById('auditSearchInput').value);
-  });
-
-  document.getElementById('auditResultFilter')?.addEventListener('change', (e) => {
-    renderAuditTable(document.getElementById('auditModuleFilter').value, e.target.value, document.getElementById('auditSearchInput').value);
-  });
-
-  // ── 15. BOOTSTRAP INITIALIZATION ─────────────────────────────────────────────
-  renderProvidersTable();
-  renderBookingsTable();
-  renderBloodRequestsTable();
-  renderEmployeesTable();
-  renderAuditTable();
-  updateDashboardMetrics();
-  initCharts();
-
-  // Pull live records from Supabase tables immediately
-  fetchLiveSupabaseData();
-
-  // Check auth session
-  checkExistingSession();
-
-
-});
+  boot();
+})();
