@@ -948,7 +948,7 @@
           });
         },
         restore: async (btn) => {
-          const ok = await confirmBox({ title: 'Restore this account?', message: 'They can sign in again. Their pets stay unpublished until they turn Pet Match back on.', confirmLabel: 'Restore' });
+          const ok = await confirmBox({ title: 'Restore this account?', message: 'They can sign in again. The Pet Match listings and donor availability that were on before the suspension come back.', confirmLabel: 'Restore' });
           if (ok == null) return;
           await busy(btn, async () => {
             await act('user.unsuspend', id);
