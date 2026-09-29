@@ -1730,6 +1730,7 @@
       const r = await act('broadcast.send', 'new', { broadcast: d });
       if (r?.push_error) toast(r.push_error, 'warning');
       else toast(`Sent: ${r.recipients} in the inbox, ${r.delivered} of ${r.devices} phones reached.`, 'success');
+      if (r?.history_error) toast(r.history_error, 'warning');
       announceDraft = blankAnnouncement();
       renderCurrent();
     });
