@@ -23,8 +23,20 @@
 
 (() => {
   // ── Configuration ──────────────────────────────────────────────────────────
-  const SUPABASE_URL = 'https://iythfpzwxrbvxfmutxai.supabase.co';
-  const SUPABASE_KEY = 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
+  // Opened from this computer (localhost) the portal talks to the STAGING
+  // project, so staff features can be tried on test data; the published site
+  // (GitHub Pages / Netlify) always uses production.
+  const IS_STAGING = ['localhost', '127.0.0.1'].includes(location.hostname);
+  const SUPABASE_URL = IS_STAGING
+    ? 'https://jyzyvwdwcrgbtxfqcscg.supabase.co'
+    : 'https://iythfpzwxrbvxfmutxai.supabase.co';
+  const SUPABASE_KEY = IS_STAGING
+    ? 'sb_publishable_089uZjQk0lF9GI7Nfb9mFA_QhgM4kur'
+    : 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
+  if (IS_STAGING) {
+    document.title = `STAGING · ${document.title}`;
+    document.documentElement.dataset.env = 'staging';
+  }
   const LIST_LIMIT = 300;
 
   // An invite or password-reset link lands here with its type in the URL
@@ -218,7 +230,11 @@
   }
 
   // ── Auth screens ───────────────────────────────────────────────────────────
+  /** Why the set-password form is showing: 'invite', 'recovery' or 'temp'. */
+  let setPasswordReason = null;
+
   function showAuth(mode, note) {
+    setPasswordReason = mode === 'set-password' ? note : null;
     $('#app').hidden = true;
     $('#authScreen').hidden = false;
     $('#signInForm').hidden = mode !== 'signin';
@@ -227,12 +243,15 @@
     $('#authSubtitle').textContent = {
       signin: 'Sign in with your staff account',
       forgot: 'Reset your password',
-      'set-password': note === 'invite' ? 'Welcome — set your password' : 'Set a new password',
+      'set-password': note === 'invite' ? 'Welcome — set your password'
+        : note === 'temp' ? 'Choose your own password' : 'Set a new password',
     }[mode];
     if (mode === 'set-password') {
       $('#setPasswordNote').textContent = note === 'invite'
         ? 'You have been invited to the DoggyJi admin portal. Choose a password to finish setting up your account.'
-        : 'Choose a new password for your staff account.';
+        : note === 'temp'
+          ? 'You signed in with a temporary password. Choose your own to continue; the temporary one then stops working.'
+          : 'Choose a new password for your staff account.';
     }
   }
 
@@ -255,6 +274,21 @@
       await sb.auth.signOut();
       showAuth('signin');
       toast(`This staff account is ${staff.status}.`, 'error');
+      return;
+    }
+
+    // Signed in with a temporary password (Create account / Reset password):
+    // they choose their own before anything else. The server refuses every
+    // other action until then, so this is not the only guard.
+    if (user.app_metadata?.must_change_password) {
+      const expires = Date.parse(user.app_metadata.temp_password_expires_at || '');
+      if (!Number.isNaN(expires) && expires < Date.now()) {
+        await sb.auth.signOut();
+        showAuth('signin');
+        toast('Your temporary password has expired. Ask a Super Administrator for a new one.', 'error');
+        return;
+      }
+      showAuth('set-password', 'temp');
       return;
     }
 
@@ -325,7 +359,19 @@
     if (a !== b) { toast('The two passwords do not match.', 'warning'); return; }
     const btn = e.submitter || $('#setPasswordForm button[type=submit]');
     btn.disabled = true;
-    const { error } = await sb.auth.updateUser({ password: a });
+    let error = null;
+    if (setPasswordReason === 'temp') {
+      // Through the server, which sets the password and clears the
+      // temporary-password flag together; then a fresh session carries it.
+      try {
+        await act('self.set_password', 'self', { password: a });
+        await sb.auth.refreshSession();
+      } catch (e) {
+        error = e;
+      }
+    } else {
+      ({ error } = await sb.auth.updateUser({ password: a }));
+    }
     btn.disabled = false;
     if (error) { toast(error.message || 'Could not save the password.', 'error'); return; }
     $('#newPassword').value = '';
@@ -1837,7 +1883,7 @@
         ${roles.map((r) => `<td>${has.has(`${r.id}|${p.id}`) ? '<span class="yes">✓</span>' : '<span class="no">—</span>'}</td>`).join('')}</tr>`).join('')}
       </tbody></table></div>`;
 
-    return `<div class="toolbar"><span class="grow"></span>${manage ? '<button class="btn btn-primary" data-action="invite-staff">+ Invite staff member</button>' : ''}</div>
+    return `<div class="toolbar"><span class="grow"></span>${manage ? '<button class="btn btn-outline" data-action="create-staff">+ Create account</button><button class="btn btn-primary" data-action="invite-staff">+ Invite staff member</button>' : ''}</div>
       <div class="card">${table}</div>
       <div class="card" style="margin-top:20px"><div class="card-head"><div><h3>What each role can do</h3><p>Enforced by the database and the admin-action function, not by this page.</p></div></div>
       <div style="padding:8px 0 4px">${matrix}</div></div>`;
@@ -1870,6 +1916,59 @@
     });
   };
 
+  /**
+   * Shows a one-time password once. It is not kept anywhere in the page after
+   * the box closes, and the server never records it.
+   */
+  function showTempPassword({ title, email, password, expires }) {
+    openModal({
+      title,
+      subtitle: email,
+      body: `
+        <p style="margin-bottom:12px">Give this temporary password to them privately (in person or a direct message). It is shown <b>only now</b>.</p>
+        <div class="field"><label for="tmpPw">Temporary password</label>
+          <input class="input mono" id="tmpPw" readonly value="${esc(password)}"></div>
+        <p class="note" style="margin:0">They sign in with ${esc(email)} and this password, and must then choose their own before doing anything else.
+          It stops working on ${esc(fmtDate(expires))}.</p>`,
+      foot: '<button class="btn btn-outline" data-action="m" data-id="copy">Copy password</button><button class="btn btn-primary" data-action="close-modal">Done</button>',
+      handlers: {
+        copy: async () => {
+          try {
+            await navigator.clipboard.writeText(password);
+            toast('Password copied.', 'success');
+          } catch (_) {
+            $('#tmpPw').select();
+            toast('Select the password and copy it.', 'warning');
+          }
+        },
+      },
+    });
+  }
+
+  ACTIONS['create-staff'] = () => {
+    openModal({
+      title: 'Create a staff account',
+      body: `
+        <div class="field"><label for="crName">Full name *</label><input class="input" id="crName"></div>
+        <div class="field"><label for="crEmail">Email *</label><input class="input" type="email" id="crEmail"></div>
+        <div class="field"><label for="crRole">Role *</label><select class="select" id="crRole">${roleRows.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}</select></div>
+        <p class="note" style="margin:0">Makes their login now, with no email sent. You get a temporary password to give them; at their first sign-in they must choose their own. Use this when invitation emails do not arrive. An email that already has a DoggyJi account is refused — use Invite for those.</p>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="create">Create account</button>',
+      handlers: {
+        create: async (btn) => {
+          const full_name = $('#crName').value.trim();
+          const email = $('#crEmail').value.trim().toLowerCase();
+          if (!full_name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast('Enter a name and a valid email.', 'warning'); return; }
+          await busy(btn, async () => {
+            const r = await act('staff.create', 'new', { full_name, email, role_id: $('#crRole').value });
+            renderCurrent();
+            showTempPassword({ title: 'Account created', email, password: r.temp_password, expires: r.temp_password_expires_at });
+          });
+        },
+      },
+    });
+  };
+
   ACTIONS['edit-staff'] = (id) => {
     const s = staffRows.find((x) => x.id === id);
     if (!s) return;
@@ -1881,8 +1980,21 @@
         <div class="field"><label for="stStatus">Status</label><select class="select" id="stStatus">${[['active', 'Active'], ['suspended', 'Suspended'], ['disabled', 'Disabled']]
     .map(([v, l]) => `<option value="${v}" ${v === s.status ? 'selected' : ''}>${l}</option>`).join('')}</select>
           <span class="hint">Suspended or disabled staff cannot use the portal. Their sign-in still works for the app.</span></div>`,
-      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>',
+      foot: `${s.auth_user_id ? '<button class="btn btn-ghost left" data-action="m" data-id="reset">Reset password</button>' : ''}
+        <button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>`,
       handlers: {
+        reset: async (btn) => {
+          const ok = await confirmBox({
+            title: `Reset ${s.full_name}'s password?`,
+            message: 'Their current password stops working. You get a temporary one to give them, and they must choose their own at their next sign-in.',
+            confirmLabel: 'Reset password', tone: 'danger',
+          });
+          if (ok == null) return;
+          await busy(btn, async () => {
+            const r = await act('staff.reset_password', s.id);
+            showTempPassword({ title: 'Password reset', email: s.email, password: r.temp_password, expires: r.temp_password_expires_at });
+          });
+        },
         save: async (btn) => {
           const changes = {};
           if ($('#stRole').value !== s.role_id) changes.role_id = $('#stRole').value;

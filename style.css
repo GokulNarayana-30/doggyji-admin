@@ -339,6 +339,12 @@ pre.json { background: var(--bg-input); border: 1px solid var(--border); border-
 /* ── Banners ──────────────────────────────────────────────────────────────── */
 .banner-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .banner-card { overflow: hidden; display: flex; flex-direction: column; }
+/* Staging (opened from localhost): an orange strip so it is never mistaken for production. */
+html[data-env="staging"] body::before {
+  content: 'STAGING — test data'; position: fixed; top: 0; left: 50%; transform: translateX(-50%);
+  z-index: 9999; background: #D97706; color: #fff; font: 800 11px/1 var(--font-heading, sans-serif);
+  letter-spacing: .08em; padding: 5px 14px; border-radius: 0 0 8px 8px; pointer-events: none;
+}
 .push-preview { background: var(--bg-input); border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; box-shadow: var(--shadow); }
 .push-head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); margin-bottom: 6px; }
 .push-head .grow { flex: 1; }
