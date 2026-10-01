@@ -25,14 +25,15 @@
   // ── Configuration ──────────────────────────────────────────────────────────
   // Opened from this computer (localhost) the portal talks to the STAGING
   // project, so staff features can be tried on test data; the published site
-  // (GitHub Pages / Netlify) always uses production.
+  // (GitHub Pages / Netlify) always uses production. Since 1 Oct 2026
+  // production is the Mumbai project and staging the former Sydney one.
   const IS_STAGING = ['localhost', '127.0.0.1'].includes(location.hostname);
   const SUPABASE_URL = IS_STAGING
-    ? 'https://jyzyvwdwcrgbtxfqcscg.supabase.co'
-    : 'https://iythfpzwxrbvxfmutxai.supabase.co';
+    ? 'https://iythfpzwxrbvxfmutxai.supabase.co'
+    : 'https://jyzyvwdwcrgbtxfqcscg.supabase.co';
   const SUPABASE_KEY = IS_STAGING
-    ? 'sb_publishable_089uZjQk0lF9GI7Nfb9mFA_QhgM4kur'
-    : 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt';
+    ? 'sb_publishable_gELA10B-jQjVy_eYK2QBTQ_1OERZEOt'
+    : 'sb_publishable_089uZjQk0lF9GI7Nfb9mFA_QhgM4kur';
   if (IS_STAGING) {
     document.title = `STAGING · ${document.title}`;
     document.documentElement.dataset.env = 'staging';
@@ -45,8 +46,6 @@
   const landingType = landingHash.get('type');
   const landingQuery = new URLSearchParams(location.search);
   const landingError = landingHash.get('error_description') || landingQuery.get('error_description');
-  // Back from "Continue with Google": a session in the hash with no link type.
-  const landingOAuth = landingHash.has('access_token') && !landingType;
 
   if (!window.supabase || typeof window.supabase.createClient !== 'function') {
     document.body.innerHTML = '<div class="state"><div class="ico">⚠️</div><h4>Could not load the admin portal</h4><p>A required script did not load. Check your connection and reload the page.</p></div>';
@@ -601,21 +600,6 @@
       el.textContent = input.type === 'password' ? 'Show' : 'Hide';
     },
     'show-auth': (mode) => showAuth(mode),
-    'google-sign-in': async (_, btn) => {
-      btn.disabled = true;
-      const { error } = await sb.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: location.origin + location.pathname,
-          queryParams: { prompt: 'select_account' },
-        },
-      });
-      // On success the browser is already on its way to Google.
-      if (error) {
-        btn.disabled = false;
-        toast('Could not start Google sign-in. Try again.', 'error');
-      }
-    },
     'open-nav': () => document.body.classList.add('nav-open'),
     'close-nav': () => document.body.classList.remove('nav-open'),
     refresh: () => { renderCurrent(); refreshCounts(); },
@@ -1896,7 +1880,7 @@
         <div class="field"><label for="invName">Full name *</label><input class="input" id="invName"></div>
         <div class="field"><label for="invEmail">Email *</label><input class="input" type="email" id="invEmail"></div>
         <div class="field"><label for="invRole">Role *</label><select class="select" id="invRole">${roleRows.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}</select></div>
-        <p class="note" style="margin:0">A new email gets an invitation with a link to set a password. If the email already has a DoggyJi account that signs in with Google, that account is linked instead and they use <b>Continue with Google</b> — no email is sent. An existing password-only account is refused, because it does not prove the email is theirs.</p>`,
+        <p class="note" style="margin:0">A new email gets an invitation with a link to set a password. If the email already has a DoggyJi account that signs in with Google, that account is linked instead and no email is sent: staff sign in with a password only, so give them one with <b>Reset password</b> on their row. An existing password-only account is refused, because it does not prove the email is theirs.</p>`,
       foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="send">Send invite</button>',
       handlers: {
         send: async (btn) => {
@@ -1908,7 +1892,7 @@
             closeModal();
             toast(result.invited
               ? `Invitation sent to ${email}.`
-              : `${email} already had a Google account — linked, no email sent. They sign in with “Continue with Google”.`, 'success');
+              : `${email} already had a Google account — linked, no email sent. Use Reset password on their row to give them a one-time password.`, 'success');
             renderCurrent();
           });
         },
@@ -2097,13 +2081,6 @@
       return;
     }
     if (!session) { showAuth('signin'); return; }
-    if (landingOAuth) {
-      history.replaceState(null, '', location.pathname);
-      // A Google sign-in proves who someone is, not that they are staff:
-      // enter() signs anyone without an active staff record straight out.
-      await enter(true);
-      return;
-    }
     await enter(false);
   }
 
