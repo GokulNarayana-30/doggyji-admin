@@ -238,6 +238,7 @@
     $('#authScreen').hidden = false;
     $('#signInForm').hidden = mode !== 'signin';
     $('#forgotForm').hidden = mode !== 'forgot';
+    if (mode === 'forgot') resetForgotForm();
     $('#setPasswordForm').hidden = mode !== 'set-password';
     $('#authSubtitle').textContent = {
       signin: 'Sign in with your staff account',
@@ -334,20 +335,59 @@
     }
   });
 
+  // Forgot password, by code. The project's "Reset password" email carries a
+  // 6-digit code ({{ .Token }}), the same email the mobile app uses, so there is
+  // no link to follow: step 1 sends the code, step 2 checks it (which signs the
+  // person in for recovery) and opens the set-password form.
+  let forgotCodeSent = false;
+
+  function resetForgotForm() {
+    forgotCodeSent = false;
+    $('#forgotEmail').readOnly = false;
+    $('#forgotCodeField').hidden = true;
+    $('#forgotCode').value = '';
+    $('#forgotCode').required = false;
+    $('#forgotSubmit').textContent = 'Send code';
+    $('#forgotNote').textContent = 'Enter your staff email. If it belongs to an account, we email you a 6-digit code to set a new password.';
+  }
+
   $('#forgotForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const btn = e.submitter || $('#forgotForm button[type=submit]');
+    const btn = e.submitter || $('#forgotSubmit');
+    const email = $('#forgotEmail').value.trim().toLowerCase();
     btn.disabled = true;
-    const { error } = await sb.auth.resetPasswordForEmail($('#forgotEmail').value.trim().toLowerCase(), {
-      redirectTo: location.origin + location.pathname,
-    });
-    btn.disabled = false;
-    if (error && /rate|seconds/i.test(error.message)) {
-      toast('Too many requests. Wait a minute and try again.', 'warning');
-      return;
+    try {
+      if (!forgotCodeSent) {
+        const { error } = await sb.auth.resetPasswordForEmail(email);
+        if (error && /rate|seconds/i.test(error.message)) {
+          toast('Too many requests. Wait a minute and try again.', 'warning');
+          return;
+        }
+        // Same answer whether or not the email has an account.
+        forgotCodeSent = true;
+        $('#forgotEmail').readOnly = true;
+        $('#forgotCodeField').hidden = false;
+        $('#forgotCode').required = true;
+        $('#forgotSubmit').textContent = 'Verify code';
+        $('#forgotNote').textContent = `If ${email} belongs to an account, a 6-digit code is on its way.`;
+        $('#forgotCode').focus();
+        return;
+      }
+      const token = $('#forgotCode').value.trim();
+      if (!/^[0-9]{6}$/.test(token)) { toast('Enter the 6-digit code from the email.', 'warning'); return; }
+      const { error } = await sb.auth.verifyOtp({ email, token, type: 'recovery' });
+      if (error) {
+        toast(/rate|seconds/i.test(error.message)
+          ? 'Too many tries. Wait a minute and try again.'
+          : 'That code is wrong or has expired.', 'error');
+        return;
+      }
+      showAuth('set-password', 'recovery');
+    } catch (_) {
+      toast('Could not reach the server. Check your connection and try again.', 'error');
+    } finally {
+      btn.disabled = false;
     }
-    toast('If that email belongs to a staff account, a reset link is on its way.', 'success');
-    showAuth('signin');
   });
 
   $('#setPasswordForm').addEventListener('submit', async (e) => {

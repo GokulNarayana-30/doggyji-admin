@@ -54,12 +54,17 @@
       </form>
 
       <form id="forgotForm" hidden>
-        <p class="note" style="margin:0 0 14px">Enter your staff email. If it belongs to a staff account, you will get a link to set a new password.</p>
+        <p class="note" style="margin:0 0 14px" id="forgotNote">Enter your staff email. If it belongs to an account, we email you a 6-digit code to set a new password.</p>
         <div class="field">
           <label for="forgotEmail">Email</label>
           <input class="input" type="email" id="forgotEmail" autocomplete="username" required>
         </div>
-        <button class="btn btn-primary btn-block" type="submit">Send reset link</button>
+        <div class="field" id="forgotCodeField" hidden>
+          <label for="forgotCode">Code from the email</label>
+          <input class="input" id="forgotCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}">
+          <span class="hint">Check your spam folder too. The code expires in 10 minutes.</span>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit" id="forgotSubmit">Send code</button>
         <div class="auth-links">
           <button type="button" data-action="show-auth" data-id="signin">← Back to sign in</button>
           <span></span>
