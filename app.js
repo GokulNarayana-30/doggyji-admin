@@ -1111,9 +1111,9 @@
         ${can('providers.approve') && p.verification_status !== 'approved' ? '<button class="btn btn-success" data-action="m" data-id="approve">Approve</button>' : ''}`,
       handlers: new Proxy({
         approve: (btn) => decideProvider(btn, p, 'provider.approve', 'Approve this provider?', 'They appear in the app as a verified provider.', false),
-        reject: (btn) => decideProvider(btn, p, 'provider.reject', 'Reject this application?', 'They will not appear in the app.', true),
+        reject: (btn) => decideProvider(btn, p, 'provider.reject', 'Reject this application?', 'They will not appear in the app. They see your reason in the app and can apply again after 5 days.', true),
         changes: (btn) => decideProvider(btn, p, 'provider.request_changes', 'Ask for changes?', 'The application goes back to pending. Tell them what is missing (you will need to contact them directly).', true),
-        suspend: (btn) => decideProvider(btn, p, 'provider.suspend', 'Suspend this provider?', 'They are removed from the app’s provider directory.', true),
+        suspend: (btn) => decideProvider(btn, p, 'provider.suspend', 'Suspend this provider?', 'They are removed from the app’s provider directory and cannot apply again unless you approve them. They see your reason in the app.', true),
       }, {
         get(target, key) {
           if (key in target) return target[key];
@@ -1130,7 +1130,7 @@
   async function decideProvider(btn, p, action, title, message, needReason) {
     const reason = await confirmBox({
       title, message, confirmLabel: 'Confirm', tone: action === 'provider.approve' ? 'success' : 'danger',
-      field: { label: needReason ? 'Reason' : 'Note (optional)', required: needReason, placeholder: 'Recorded in the audit log' },
+      field: { label: needReason ? 'Reason' : 'Note (optional)', required: needReason, placeholder: needReason && /reject|suspend/.test(action) ? 'Shown to the provider in the app, and recorded in the audit log' : 'Recorded in the audit log' },
     });
     if (reason == null) return;
     await busy(btn, async () => {
