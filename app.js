@@ -1198,26 +1198,45 @@
         <td>${esc(titleCase(b.service_type))}</td>
         <td>${esc(money(b.total_price))}<div class="cell-sub">${esc(titleCase(b.payment_status || ''))}</div></td>
         <td>${statusBadge(b.status)}</td>
-        <td class="actions">${can('bookings.manage') ? `<button class="btn btn-outline btn-sm" data-action="edit-booking" data-id="${esc(b.id)}">Change status</button>` : ''}</td>
+        <td class="actions">${can('bookings.manage') && bookingMoves(b).length ? `<button class="btn btn-outline btn-sm" data-action="edit-booking" data-id="${esc(b.id)}">Change status</button>` : ''}</td>
       </tr>`).join('')}</tbody></table></div>`
       : emptyHtml('📅', 'No bookings', 'Bookings made in the app’s Pet Services section appear here.');
 
     return `<div class="toolbar">${tabs}</div><div class="card">${table}</div>`;
   };
 
+  /**
+   * What staff may change a booking to, mirroring admin-action: confirm only a
+   * pending request (when the provider agreed), cancel anything not finished,
+   * mark done only a confirmed booking from its date. Finished bookings can't
+   * be changed.
+   */
+  function bookingMoves(b) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (b.status === 'pending') return [['confirmed', 'Confirmed (the provider agreed)'], ['cancelled', 'Cancelled']];
+    if (b.status === 'confirmed') {
+      const moves = [['cancelled', 'Cancelled']];
+      if (String(b.booking_date) <= today) moves.unshift(['completed', 'Completed (done)']);
+      return moves;
+    }
+    return [];
+  }
+
   ACTIONS['edit-booking'] = (id) => {
     const b = bookingRows.find((x) => x.id === id);
     if (!b) return;
+    const moves = bookingMoves(b);
+    if (!moves.length) return;
     openModal({
       title: 'Change booking status',
       subtitle: `${titleCase(b.service_type)} on ${fmtDate(b.booking_date)} · currently ${b.status}`,
       body: `
         <div class="field"><label for="bkStatus">New status</label>
-          <select class="select" id="bkStatus">${['pending', 'confirmed', 'completed', 'cancelled']
-    .map((s) => `<option value="${s}" ${s === b.status ? 'selected' : ''}>${titleCase(s)}</option>`).join('')}</select></div>
+          <select class="select" id="bkStatus">${moves
+    .map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('')}</select></div>
         <div class="field"><label for="bkReason">Reason *</label>
-          <textarea class="textarea" id="bkReason" placeholder="e.g. Customer asked to cancel by phone"></textarea></div>
-        <p class="note" style="margin:0">Refunds are not handled here: payment for services is arranged outside the app.</p>`,
+          <textarea class="textarea" id="bkReason" placeholder="e.g. Customer asked to cancel by phone; provider agreed by phone"></textarea></div>
+        <p class="note" style="margin:0">The customer and the provider are notified in the app. Confirm only when the provider has agreed. Refunds are not handled here: payment for services is arranged outside the app.</p>`,
       foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save</button>',
       handlers: {
         save: async (btn) => {
@@ -1226,9 +1245,13 @@
           if (!reason) { toast('A reason is required.', 'warning'); return; }
           if (status === b.status) { closeModal(); return; }
           await busy(btn, async () => {
-            await act('booking.set_status', b.id, { status, reason });
+            const r = await act('booking.set_status', b.id, { status, reason });
             closeModal();
-            toast('Booking updated.', 'success');
+            const n = r && r.notified;
+            toast(n && n.error
+              ? `Booking updated. ${n.error}`
+              : `Booking updated. Customer and provider notified${n && n.pushed ? ` (${n.pushed} push${n.pushed === 1 ? '' : 'es'})` : ''}.`,
+            n && n.error ? 'warning' : 'success');
             renderCurrent(); refreshCounts();
           });
         },
