@@ -1264,6 +1264,20 @@
   // ════════════════════════════════════════════════════════════════════════════
   let directoryRows = [];
 
+  /**
+   * Where to check a clinic or blood bank on Google Maps before approving it:
+   * the link the submitter gave, else their coordinates, else a search for the
+   * name and address (listings sent before the link was stored).
+   */
+  function mapsLinkHtml(r) {
+    const saved = typeof r.maps_url === 'string' && /^https:\/\//i.test(r.maps_url) ? r.maps_url : '';
+    const coords = r.lat != null && r.lng != null ? `${r.lat},${r.lng}` : '';
+    const href = saved
+      || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(coords || [r.name, r.address, r.city].filter(Boolean).join(', '))}`;
+    const label = saved ? '📍 Open the Maps link they gave' : coords ? '📍 Open their location' : '📍 Search on Maps (no link given)';
+    return `<div class="cell-sub"><a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a></div>`;
+  }
+
   RENDER.directory = async () => {
     const { kind, status } = state.directory;
     const rows = await q(sb.from(kind).select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
@@ -1278,7 +1292,7 @@
     const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
       <th>Name</th><th>City</th><th class="hide-sm">Phone</th><th>${isClinic ? 'Specialties / hours' : 'Blood types'}</th><th class="hide-sm">Submitted by</th><th>Status</th><th></th></tr></thead><tbody>
       ${list.map((r) => `<tr>
-        <td><div class="cell-main">${esc(r.name)}</div><div class="cell-sub cell-clip">${esc(r.address || '')}</div></td>
+        <td><div class="cell-main">${esc(r.name)}</div><div class="cell-sub cell-clip">${esc(r.address || '')}</div>${mapsLinkHtml(r)}</td>
         <td>${esc(r.city || '—')}</td>
         <td class="hide-sm nowrap">${r.phone ? `<a href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : '—'}</td>
         <td><div class="cell-clip">${isClinic
