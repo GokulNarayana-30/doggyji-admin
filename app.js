@@ -520,6 +520,7 @@
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
     orders: { q: '' },
+    support: { status: 'open' },
     audit: { result: 'all', q: '' },
   };
 
@@ -555,6 +556,11 @@
         ]);
         return (reqs ?? 0) + (calls ?? 0);
       } },
+    { id: 'support', label: 'Support', icon: '💬', section: 'Doggy Ji chat', perms: ['support.manage'],
+      title: 'Support', subtitle: 'Customers writing to Doggy Ji from the app',
+      count: () => countOf('support_threads', (b) => b.eq('status', 'open')) },
+    { id: 'promote', label: 'Promotions', icon: '🏷️', section: 'Doggy Ji chat', perms: ['notifications.send'],
+      title: 'Promotions', subtitle: 'Offers and products, posted in everyone’s Doggy Ji chat' },
     { id: 'banners', label: 'Home banners', icon: '🖼️', section: 'Content', perms: ['banners.manage'],
       title: 'Home banners', subtitle: 'The carousel at the top of the app’s home screen' },
     { id: 'announce', label: 'Notifications', icon: '📣', section: 'Content', perms: ['notifications.send'],
@@ -1692,7 +1698,7 @@
     ['/pet-services', 'Pet services'],
     ['/my-pet', 'My pets'],
     ['/subscriptions', 'Subscriptions'],
-    ['/home/loyalty', 'Paw Points'],
+    ['/doggyji', 'Doggy Ji chat'],
   ];
   const AUDIENCES = [
     ['all', 'Everyone'],
@@ -1839,6 +1845,313 @@
       else toast(`Sent: ${r.recipients} in the inbox, ${r.delivered} of ${r.devices} phones reached.`, 'success');
       if (r?.history_error) toast(r.history_error, 'warning');
       announceDraft = blankAnnouncement();
+      renderCurrent();
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Doggy Ji chat: Support (customers write in the app, staff answer here)
+  // ════════════════════════════════════════════════════════════════════════════
+  const SUPPORT_TABS = [['open', 'Waiting for us'], ['replied', 'Replied'], ['closed', 'Closed'], ['all', 'All']];
+  const TOPIC_LABEL = { order: 'Order', subscription: 'Subscription', booking: 'Booking', account: 'Account', other: 'Other' };
+
+  RENDER.support = async () => {
+    const status = state.support.status;
+    let query = sb.from('support_threads').select('*').order('last_message_at', { ascending: false }).limit(200);
+    if (status !== 'all') query = query.eq('status', status);
+    const [rows, open] = await Promise.all([q(query), countOf('support_threads', (b) => b.eq('status', 'open'))]);
+    const people = await profilesFor(rows.map((r) => r.user_id));
+    const tabs = tabsHtml('support', 'status', SUPPORT_TABS, status, { open });
+    const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Customer</th><th>Last message</th><th>When</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map((t) => `<tr>
+        <td>${personCell(people[t.user_id], t.user_id)}</td>
+        <td><div class="cell-sub">${t.last_sender === 'staff' ? 'Us: ' : ''}${esc(t.last_message_text || '')}</div></td>
+        <td class="nowrap">${esc(ago(t.last_message_at))}</td>
+        <td>${badge({ open: 'Waiting for us', replied: 'Replied', closed: 'Closed' }[t.status] || t.status, { open: 'red', replied: 'blue', closed: 'slate' }[t.status] || 'slate')}</td>
+        <td class="nowrap"><button class="btn btn-outline btn-sm" data-action="open-thread" data-id="${esc(t.id)}">Open</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('💬', 'Nothing here', status === 'open' ? 'No customer is waiting for a reply.' : 'No conversations in this list.');
+    return `${tabs}<div class="card">${table}</div>
+      <p class="note">Customers write from Help &amp; Support or the pinned “Doggy Ji” chat in the app’s Messages. Your reply appears in their chat as “Doggy Ji” (your name shows only here) and they get a push notification.</p>`;
+  };
+
+  function supportMessagesHtml(msgs, customerName) {
+    if (!msgs.length) return emptyHtml('💬', 'No messages', 'This conversation is empty.');
+    return `<div class="support-log">${msgs.map((m) => {
+      const staff = m.sender === 'staff';
+      const who = staff ? `${m.staff_name || 'Staff'} (Doggy Ji)` : customerName;
+      return `<div class="support-msg ${staff ? 'staff' : 'customer'}">
+        <div class="support-meta">${esc(who)} · ${esc(fmtDateTime(m.created_at))}${m.topic ? ` · ${badge(TOPIC_LABEL[m.topic] || m.topic, 'blue')}` : ''}${m.promotion_id ? ` · ${badge('About an offer', 'amber')}` : ''}</div>
+        <div class="support-body">${esc(m.body)}</div>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  async function openThread(id) {
+    const [{ data: t }, msgs] = await Promise.all([
+      sb.from('support_threads').select('*').eq('id', id).maybeSingle(),
+      q(sb.from('support_messages').select('*').eq('thread_id', id).order('created_at', { ascending: true }).limit(500)),
+    ]);
+    if (!t) { toast('This conversation no longer exists.', 'warning'); return; }
+    const p = (await profilesFor([t.user_id]))[t.user_id];
+    const name = p?.full_name || (p?.username ? `@${p.username}` : `User ${shortId(t.user_id)}`);
+    const closed = t.status === 'closed';
+    openModal({
+      title: name,
+      subtitle: [p?.username ? `@${p.username}` : null, p?.email, p?.phone, p?.city].filter(Boolean).join(' · '),
+      wide: true,
+      body: `${supportMessagesHtml(msgs, name)}
+        <div class="field" style="margin-top:14px"><label for="supReply">Reply as Doggy Ji</label>
+        <textarea class="textarea" id="supReply" maxlength="2000" placeholder="Write your reply…"></textarea></div>`,
+      foot: `<button class="btn btn-ghost" data-action="open-user" data-id="${esc(t.user_id)}">View user</button>
+        <span class="grow"></span>
+        <button class="btn btn-outline" data-action="m" data-id="status">${closed ? 'Reopen' : 'Close conversation'}</button>
+        <button class="btn btn-primary" data-action="m" data-id="reply">Send reply</button>`,
+      handlers: {
+        reply: async (btn) => {
+          const body = $('#supReply').value.trim();
+          if (!body) { toast('Write a reply first.', 'warning'); return; }
+          await busy(btn, async () => {
+            const r = await act('support.reply', id, { body });
+            toast(r?.notify_error ? r.notify_error : 'Reply sent.', r?.notify_error ? 'warning' : 'success');
+            closeModal();
+            renderCurrent();
+            refreshCounts();
+          });
+        },
+        status: async (btn) => {
+          await busy(btn, async () => {
+            await act('support.set_status', id, { status: closed ? 'open' : 'closed' });
+            toast(closed ? 'Conversation reopened.' : 'Conversation closed.', 'success');
+            closeModal();
+            renderCurrent();
+            refreshCounts();
+          });
+        },
+      },
+    });
+    const log = $('#modalRoot .support-log');
+    if (log) log.scrollTop = log.scrollHeight;
+  }
+
+  ACTIONS['open-thread'] = (id) => openThread(id).catch((e) => toast(readError(e), 'error'));
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Doggy Ji chat: Promotions (an offer card in everyone's Doggy Ji chat)
+  // ════════════════════════════════════════════════════════════════════════════
+  // The shop's public Storefront API, the same read-only catalog the app uses,
+  // for picking a product. The token can only read the catalog.
+  const SHOP_ENDPOINT = 'https://www.doggyji.com/api/2025-01/graphql.json';
+  const SHOP_TOKEN = 'e559e2d194508de161c1834320c82bc1';
+  const PROMO_AUDIENCES = [['all', 'Everyone'], ['city', 'People in one city'], ['user', 'One person (for testing)']];
+  const blankPromotion = () => ({ title: '', body: '', audience: 'user', audience_value: '', image_url: '', product: null });
+  let promoDraft = blankPromotion();
+
+  async function searchProducts(term) {
+    const res = await fetch(SHOP_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Storefront-Access-Token': SHOP_TOKEN },
+      body: JSON.stringify({
+        query: `query($q: String) { products(first: 8, query: $q) { edges { node {
+          id title availableForSale featuredImage { url } priceRange { minVariantPrice { amount } } } } } }`,
+        variables: { q: term || null },
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.errors) throw new Error('Could not search the shop.');
+    return (body.data?.products?.edges || []).map(({ node: n }) => ({
+      // The app's product id is the number at the end of the Shopify gid.
+      id: String(n.id).split('/').pop(),
+      title: n.title,
+      image: safeUrl(n.featuredImage?.url),
+      price: Number(n.priceRange?.minVariantPrice?.amount ?? 0),
+      available: n.availableForSale,
+    })).filter((p) => /^\d+$/.test(p.id));
+  }
+
+  function promoPreview(d) {
+    const img = safeUrl(d.image_url);
+    return `<div class="promo-preview">
+      ${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : ''}
+      <div class="promo-pad">
+        <div class="promo-tag">🏷️ Offer from Doggy Ji</div>
+        <div class="push-title">${esc(d.title || 'Title')}</div>
+        <div class="push-body">${esc(d.body || 'Your message appears here.')}</div>
+        ${d.product ? `<div class="cell-main" style="margin-top:6px">${esc(d.product.title)} · ${esc(money(d.product.price))}</div>` : ''}
+        <div class="promo-actions"><span>💬 Ask about this</span>${d.product ? '<span class="promo-btn">View product</span>' : ''}</div>
+      </div></div>`;
+  }
+
+  RENDER.promote = async () => {
+    const rows = await q(sb.from('promotions').select('*').order('created_at', { ascending: false }).limit(50));
+    const dayAgo = Date.now() - 864e5;
+    const used = rows.filter((r) => r.audience !== 'user' && r.status !== 'failed' && new Date(r.created_at) > dayAgo).length;
+    const d = promoDraft;
+    const opt = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+
+    const form = `<div class="card card-pad">
+      <div class="field-row">
+        <div class="field"><label for="prAudience">Send to</label><select class="select" id="prAudience">${opt(PROMO_AUDIENCES, d.audience)}</select></div>
+        <div class="field" id="prValueField" ${d.audience === 'all' ? 'hidden' : ''}>
+          <label for="prValue" id="prValueLabel">${d.audience === 'user' ? 'Username or user id' : 'City'}</label>
+          <input class="input" id="prValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? '@username' : 'e.g. Bengaluru'}"></div>
+      </div>
+      <div class="field"><label for="prTitle">Title * <span class="cell-sub" id="prTitleCount"></span></label>
+        <input class="input" id="prTitle" maxlength="65" value="${esc(d.title)}" placeholder="e.g. Ragi Shots are back in stock"></div>
+      <div class="field"><label for="prBody">Message * <span class="cell-sub" id="prBodyCount"></span></label>
+        <textarea class="textarea" id="prBody" maxlength="500" placeholder="Tell people about the offer">${esc(d.body)}</textarea></div>
+      <div class="field"><label for="prSearch">Product (optional)</label>
+        <div class="toolbar" style="margin:0"><input class="input" id="prSearch" placeholder="Search the shop, e.g. ragi">
+        <button class="btn btn-outline" data-action="promo-search">Search</button></div>
+        <div id="prResults"></div>
+        <div id="prPicked">${d.product ? `<div class="quote" style="margin-top:8px">Selected: <strong>${esc(d.product.title)}</strong> · ${esc(money(d.product.price))} <button class="btn btn-ghost btn-sm" data-action="promo-unpick">Remove</button></div>` : ''}</div></div>
+      <div class="field"><label for="prImage">Image address (https, optional)</label>
+        <input class="input" id="prImage" maxlength="500" value="${esc(d.image_url)}" placeholder="Filled in from the product; or paste an https:// image link"></div>
+      <p class="cell-sub" id="prReach">Check the reach before sending.</p>
+      <div class="toolbar" style="margin:12px 0 0">
+        <button class="btn btn-outline" data-action="promo-preview">Check reach</button>
+        <span class="grow"></span>
+        <button class="btn btn-primary" data-action="promo-send">Send promotion</button>
+      </div>
+      <p class="note">Promotions to a group used in the last 24 hours: ${esc(used)} of 1. “One person” is not limited: use it to try a promotion on your own account first.
+        It appears in each person’s Doggy Ji chat for 30 days. People who turned off “News &amp; announcements” in the app see it there without a push.</p>
+    </div>`;
+
+    const preview = `<div class="card card-pad"><div class="section-title" style="margin-top:0">In the app</div><div id="prPreview">${promoPreview(d)}</div></div>`;
+
+    const history = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Sent</th><th>Promotion</th><th>Audience</th><th>Reach</th><th>Status</th><th class="hide-sm">By</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr>
+        <td class="nowrap">${esc(fmtDateTime(r.created_at))}</td>
+        <td><div class="cell-main">${esc(r.title)}</div><div class="cell-sub">${esc(r.body)}</div>${r.product_title ? `<div class="cell-sub">🛍️ ${esc(r.product_title)}</div>` : ''}</td>
+        <td>${esc(r.audience === 'user' ? 'One person' : audienceLabel(r.audience, r.audience_value))}</td>
+        <td class="nowrap">${esc(r.recipients)} people<div class="cell-sub">${esc(r.delivered)} of ${esc(r.devices)} phones${r.failed ? ` · ${esc(r.failed)} failed` : ''}</div></td>
+        <td>${badge(titleCase(r.status), { sent: 'green', sending: 'amber', failed: 'red' }[r.status] || 'slate')}</td>
+        <td class="hide-sm cell-sub">${esc(r.sent_by)}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🏷️', 'No promotions yet', 'Promotions you send appear here with how many people they reached.');
+
+    return `<div class="grid-2">${form}${preview}</div><div class="section-title">Sent</div><div class="card">${history}</div>`;
+  };
+
+  function readPromotion() {
+    promoDraft = {
+      ...promoDraft,
+      title: $('#prTitle').value.trim(),
+      body: $('#prBody').value.trim(),
+      audience: $('#prAudience').value,
+      audience_value: $('#prValue').value.trim(),
+      image_url: $('#prImage').value.trim(),
+    };
+    return promoDraft;
+  }
+
+  function repaintPromotion() {
+    const d = readPromotion();
+    $('#prPreview').innerHTML = promoPreview(d);
+    $('#prTitleCount').textContent = `${$('#prTitle').value.length}/65`;
+    $('#prBodyCount').textContent = `${$('#prBody').value.length}/500`;
+  }
+
+  AFTER.promote = () => {
+    ['prTitle', 'prBody', 'prValue', 'prImage'].forEach((f) => document.getElementById(f).addEventListener('input', repaintPromotion));
+    $('#prSearch').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); ACTIONS['promo-search'](null, null); }
+    });
+    $('#prAudience').addEventListener('change', () => {
+      const a = $('#prAudience').value;
+      $('#prValueField').hidden = a === 'all';
+      $('#prValueLabel').textContent = a === 'user' ? 'Username or user id' : 'City';
+      $('#prValue').placeholder = a === 'user' ? '@username' : 'e.g. Bengaluru';
+      $('#prValue').value = '';
+      $('#prReach').textContent = 'Check the reach before sending.';
+      readPromotion();
+    });
+    repaintPromotion();
+  };
+
+  let productResults = [];
+
+  ACTIONS['promo-search'] = async (_, btn) => {
+    await busy(btn, async () => {
+      productResults = await searchProducts($('#prSearch').value.trim());
+      $('#prResults').innerHTML = productResults.length
+        ? `<div class="product-picks">${productResults.map((p, i) => `<button class="product-pick" data-action="promo-pick" data-id="${i}">
+            ${p.image ? `<img src="${esc(p.image)}" alt="" loading="lazy">` : ''}
+            <span><span class="cell-main">${esc(p.title)}</span><span class="cell-sub">${esc(money(p.price))}${p.available ? '' : ' · sold out'}</span></span></button>`).join('')}</div>`
+        : '<p class="cell-sub">No products found.</p>';
+    });
+  };
+
+  ACTIONS['promo-pick'] = (i) => {
+    const p = productResults[Number(i)];
+    if (!p) return;
+    readPromotion();
+    promoDraft.product = { id: p.id, title: p.title, price: p.price };
+    if (!promoDraft.image_url && p.image) promoDraft.image_url = p.image;
+    $('#prImage').value = promoDraft.image_url;
+    $('#prResults').innerHTML = '';
+    $('#prPicked').innerHTML = `<div class="quote" style="margin-top:8px">Selected: <strong>${esc(p.title)}</strong> · ${esc(money(p.price))} <button class="btn btn-ghost btn-sm" data-action="promo-unpick">Remove</button></div>`;
+    repaintPromotion();
+  };
+
+  ACTIONS['promo-unpick'] = () => {
+    readPromotion();
+    promoDraft.product = null;
+    $('#prPicked').innerHTML = '';
+    repaintPromotion();
+  };
+
+  function promotionProblem(d) {
+    if (!d.title) return 'Add a title.';
+    if (!d.body) return 'Add a message.';
+    if (d.audience === 'city' && !d.audience_value) return 'Enter the city.';
+    if (d.audience === 'user' && !d.audience_value) return 'Enter the username or user id.';
+    if (d.image_url && !safeUrl(d.image_url)) return 'The image address must start with https://';
+    return null;
+  }
+
+  const promotionPayload = (d) => ({
+    title: d.title, body: d.body, audience: d.audience, audience_value: d.audience_value,
+    image_url: d.image_url || null,
+    product_id: d.product?.id ?? null, product_title: d.product?.title ?? null, product_price: d.product?.price ?? null,
+  });
+
+  async function promotionReach(d) {
+    const r = await act('promo.preview', 'new', { promotion: promotionPayload(d) });
+    return { people: Number(r?.recipients ?? 0), phones: Number(r?.push_recipients ?? 0) };
+  }
+
+  ACTIONS['promo-preview'] = async (_, btn) => {
+    const d = readPromotion();
+    if (d.audience !== 'all' && !d.audience_value) { toast(promotionProblem(d), 'warning'); return; }
+    await busy(btn, async () => {
+      const { people, phones } = await promotionReach(d);
+      $('#prReach').textContent = people
+        ? `Reaches ${people} ${people === 1 ? 'person' : 'people'} in their Doggy Ji chat; ${phones} of them get a push.`
+        : 'Nobody matches this audience.';
+    });
+  };
+
+  ACTIONS['promo-send'] = async (_, btn) => {
+    const d = readPromotion();
+    const problem = promotionProblem(d);
+    if (problem) { toast(problem, 'warning'); return; }
+    const reach = await busy(btn, () => promotionReach(d));
+    if (!reach) return;
+    if (!reach.people) { toast('Nobody matches this audience.', 'warning'); return; }
+    const ok = await confirmBox({
+      title: `Send to ${reach.people} ${reach.people === 1 ? 'person' : 'people'}?`,
+      message: `“${d.title}” appears in their Doggy Ji chat, and ${reach.phones} get a push. It cannot be recalled once sent.`,
+      confirmLabel: 'Send now',
+    });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      const r = await act('promo.send', 'new', { promotion: promotionPayload(d) });
+      if (r?.push_error) toast(r.push_error, 'warning');
+      else toast(`Sent to ${r.recipients}: ${r.delivered} of ${r.devices} phones reached.`, 'success');
+      promoDraft = blankPromotion();
       renderCurrent();
     });
   };
