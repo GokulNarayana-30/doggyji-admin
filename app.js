@@ -135,13 +135,16 @@
 
   const badge = (text, tone = 'slate') => `<span class="badge b-${tone}">${esc(text)}</span>`;
 
+  // A Lost & Found alert drops out of the app after 14 days (lost_pets_near).
+  const LOST_LIVE_MS = 14 * 24 * 3600 * 1000;
+
   const STATUS_TONE = {
     open: 'red', reviewing: 'amber', actioned: 'green', dismissed: 'slate',
     pending: 'amber', approved: 'green', rejected: 'red', verified: 'green',
     confirmed: 'blue', completed: 'green', cancelled: 'slate',
     active: 'red', fulfilled: 'green', closed: 'slate', expired: 'slate',
     contacted: 'blue', donor_declined: 'slate', unreachable: 'amber',
-    accepted: 'green', declined: 'slate',
+    accepted: 'green', declined: 'slate', found: 'green',
     suspended: 'red', disabled: 'slate',
   };
   const statusBadge = (s) => badge(titleCase(s || 'unknown'), STATUS_TONE[s] || 'slate');
@@ -519,6 +522,7 @@
     bookings: { status: 'all' },
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
+    lost: { status: 'open' },
     orders: { q: '' },
     support: { status: 'open' },
     audit: { result: 'all', q: '' },
@@ -532,6 +536,9 @@
       count: () => countOf('user_reports', (b) => b.eq('status', 'open')) },
     { id: 'users', label: 'Users', icon: '👤', section: 'Trust & safety', perms: ['users.view', 'users.manage'],
       title: 'Users', subtitle: 'App accounts, their pets and their history' },
+    { id: 'lost', label: 'Lost pets', icon: '🔎', section: 'Trust & safety', perms: ['reports.view', 'reports.manage'],
+      title: 'Lost pets', subtitle: 'Lost & Found alerts: each one reaches everyone in its city',
+      count: () => countOf('lost_pet_alerts', (b) => b.eq('status', 'open').gt('created_at', new Date(Date.now() - LOST_LIVE_MS).toISOString())), soft: true },
     { id: 'providers', label: 'Service providers', icon: '🛡️', section: 'Services', perms: ['providers.view'],
       title: 'Service providers', subtitle: 'Applications, KYC documents and verification',
       count: () => countOf('service_providers', (b) => b.eq('verification_status', 'pending')) },
@@ -921,6 +928,78 @@
       renderCurrent(); refreshCounts();
     });
   }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Lost pets (Lost & Found alerts)
+  // ════════════════════════════════════════════════════════════════════════════
+  let lostRows = [];
+  let lostPeople = {};
+
+  const lostShown = (r) => (r.status === 'open' && Date.now() - new Date(r.created_at).getTime() > LOST_LIVE_MS ? 'expired' : r.status);
+
+  RENDER.lost = async () => {
+    const rows = await q(sb.from('lost_pet_alerts').select('*').order('created_at', { ascending: false }).limit(LIST_LIMIT));
+    lostRows = rows;
+    lostPeople = await profilesFor(rows.map((r) => r.user_id));
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[lostShown(r)] = (counts[lostShown(r)] || 0) + 1; });
+    const s = state.lost.status;
+    const list = s === 'all' ? rows : rows.filter((r) => lostShown(r) === s);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Pet</th><th>Last seen</th><th class="hide-sm">Owner</th><th>Alerted</th><th>Reported</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((r) => `<tr>
+        <td><div class="cell-main">${esc(r.pet_name)}</div><div class="cell-sub">${esc([titleCase(r.species || ''), r.breed].filter(Boolean).join(' · '))}</div></td>
+        <td><div>${esc(r.last_seen_area)}</div><div class="cell-sub">${esc(r.city)}</div></td>
+        <td class="hide-sm">${personCell(lostPeople[r.user_id], r.user_id)}</td>
+        <td>${esc(r.alerted_count)} people</td>
+        <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+        <td>${statusBadge(lostShown(r))}</td>
+        <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-lost" data-id="${esc(r.id)}">Details</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('🔎', s === 'open' ? 'No open alerts' : 'Nothing here', 'Pets reported lost in the app appear here.');
+
+    return `<div class="toolbar">${tabsHtml('lost', 'status', [['open', 'Open'], ['found', 'Found'], ['closed', 'Closed'], ['expired', 'Expired'], ['all', 'All']], s, counts)}</div>
+      <div class="card">${table}</div>
+      <p class="note">An alert is shown in the app for 14 days. Close one that is fake, offensive or a duplicate; the owner can report again (3 reports per account in 30 days).</p>`;
+  };
+
+  ACTIONS['open-lost'] = async (id) => {
+    const r = lostRows.find((x) => x.id === id);
+    if (!r) return;
+    const owner = lostPeople[r.user_id];
+    openModal({
+      title: `Lost: ${r.pet_name}`,
+      subtitle: `Reported ${fmtDateTime(r.created_at)} · ${r.alerted_count} people alerted`,
+      wide: true,
+      body: `
+        <div class="detail-grid">
+          ${r.photo_url && /^https:\/\//.test(r.photo_url) ? `<div class="detail full"><img src="${esc(r.photo_url)}" alt="" style="max-width:200px;border-radius:12px"></div>` : ''}
+          <div class="detail"><div class="k">Owner</div><div class="v">${personCell(owner, r.user_id)}</div></div>
+          <div class="detail"><div class="k">Status</div><div class="v">${statusBadge(lostShown(r))}</div></div>
+          <div class="detail"><div class="k">Last seen</div><div class="v">${esc(r.last_seen_area)}, ${esc(r.city)}</div></div>
+          <div class="detail"><div class="k">Pet</div><div class="v">${esc([titleCase(r.species || ''), r.breed].filter(Boolean).join(' · ') || '—')}</div></div>
+          <div class="detail full"><div class="k">Details</div><div class="quote">${esc(r.details || 'None given.')}</div></div>
+          ${r.closed_reason ? `<div class="detail full"><div class="k">Closed</div><div class="v">${esc(r.closed_reason)}${r.closed_at ? ` · ${esc(fmtDateTime(r.closed_at))}` : ''}</div></div>` : ''}
+        </div>`,
+      foot: `
+        ${can('users.view', 'users.manage') ? '<button class="btn btn-ghost left" data-action="m" data-id="user">View owner</button>' : ''}
+        ${can('reports.manage') && r.status === 'open' ? '<button class="btn btn-danger-outline" data-action="m" data-id="close">Close alert</button>' : ''}`,
+      handlers: {
+        user: () => { closeModal(); openUser(r.user_id); },
+        close: async (btn) => {
+          const reason = await confirmBox({ title: 'Close this alert?', message: 'It leaves Lost & Found for everyone. Use this for fake, offensive or duplicate alerts.', confirmLabel: 'Close alert', tone: 'danger', field: { label: 'Reason', required: true } });
+          if (reason == null) return;
+          await busy(btn, async () => {
+            await act('lost_pet.close', r.id, { reason });
+            closeModal();
+            toast('Alert closed.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
 
   // ════════════════════════════════════════════════════════════════════════════
   // Users
