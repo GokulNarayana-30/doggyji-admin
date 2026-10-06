@@ -570,6 +570,8 @@
       title: 'Promotions', subtitle: 'Offers and products, posted in everyone’s Doggy Ji chat' },
     { id: 'banners', label: 'Home banners', icon: '🖼️', section: 'Content', perms: ['banners.manage'],
       title: 'Home banners', subtitle: 'The carousel at the top of the app’s home screen' },
+    { id: 'popups', label: 'Pop-ups', icon: '📣', section: 'Content', perms: ['banners.manage'],
+      title: 'Pop-ups', subtitle: 'A sale or event picture shown once when the app opens' },
     { id: 'announce', label: 'Notifications', icon: '📣', section: 'Content', perms: ['notifications.send'],
       title: 'Notifications', subtitle: 'Send an announcement: a push notification plus a message in the app’s inbox' },
     { id: 'orders', label: 'Orders', icon: '📦', section: 'Content', perms: ['orders.view', 'orders.manage'],
@@ -1881,6 +1883,136 @@
       setThumb(data.publicUrl);
       repaint();
       toast('Image uploaded.', 'success');
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Pop-ups (app_popups): one picture shown once when the app opens
+  // ════════════════════════════════════════════════════════════════════════════
+  let popupRows = [];
+  // Shown on the page and in the form; the app draws the picture at 4 : 5.
+  const POPUP_SIZE_HINT = 'Portrait, 1080 × 1350 px (4 : 5). JPG or WebP, ideally under 500 KB (2 MB at most). '
+    + 'Keep words and logos away from the edges and the top-right corner, where the ✕ sits.';
+
+  function popupPreview(p) {
+    const img = safeUrl(p.image_url);
+    return `<div class="popup-preview">${img ? `<img src="${esc(img)}" alt="">` : '<span class="cell-sub">No picture yet</span>'}
+      <span class="popup-x" aria-hidden="true">✕</span></div>`;
+  }
+
+  RENDER.popups = async () => {
+    const rows = await q(sb.from('app_popups').select('*').order('created_at', { ascending: false }));
+    popupRows = rows;
+    const live = rows.filter((p) => bannerState(p)[0] === 'Live');
+    const grid = rows.length ? `<div class="popup-grid">${rows.map((p) => {
+      const [label, tone] = bannerState(p);
+      return `<div class="card popup-card">${popupPreview(p)}
+        <div class="banner-meta"><div class="grow"><div class="cell-main">${esc(p.title)}</div>
+          <div>${badge(label, tone)} <span class="cell-sub">${p.route_url ? `opens ${esc(p.route_url)}` : 'no link'}${p.ends_at ? ` · until ${esc(fmtDate(p.ends_at))}` : ''}</span></div></div>
+          <span class="actions"><button class="btn btn-outline btn-sm" data-action="edit-popup" data-id="${esc(p.id)}">Edit</button>
+          <button class="btn btn-ghost btn-sm" data-action="delete-popup" data-id="${esc(p.id)}">Delete</button></span></div></div>`;
+    }).join('')}</div>`
+      : `<div class="card">${emptyHtml('📣', 'No pop-ups', 'Add one for a sale or an event. Each person sees it once, the next time they open the app.')}</div>`;
+    return `<div class="toolbar"><p class="cell-sub grow">${esc(live.length)} live${live.length > 1 ? ' · only the newest live one is shown' : ''} · each person sees a pop-up once.</p>
+      <button class="btn btn-primary" data-action="edit-popup" data-id="new">+ New pop-up</button></div>
+      <p class="note" style="margin-top:0">Picture size: ${esc(POPUP_SIZE_HINT)}</p>${grid}`;
+  };
+
+  ACTIONS['edit-popup'] = (id) => {
+    const p = id === 'new'
+      ? { title: '', image_url: '', route_url: '/shop', is_active: false }
+      : { ...popupRows.find((x) => x.id === id) };
+    if (!p) return;
+
+    const read = () => ({
+      title: $('#puTitle').value.trim(),
+      image_url: $('#puImage').value.trim(),
+      route_url: $('#puRoute').value.trim() || null,
+      is_active: $('#puActive').checked,
+      starts_at: $('#puStart').value ? new Date($('#puStart').value).toISOString() : null,
+      ends_at: $('#puEnd').value ? new Date($('#puEnd').value).toISOString() : null,
+    });
+
+    openModal({
+      title: id === 'new' ? 'New pop-up' : 'Edit pop-up',
+      wide: true,
+      body: `
+        <div class="popup-edit">
+          <div id="puPreview">${popupPreview(p)}</div>
+          <div class="grow">
+            <div class="field"><label for="puTitle">Title * <span class="hint">(for staff, and read aloud to blind users)</span></label>
+              <input class="input" id="puTitle" maxlength="80" value="${esc(p.title)}" placeholder="e.g. Diwali sale: 20% off treats"></div>
+            <div class="field"><label for="puFile">Picture *</label>
+              <input type="file" id="puFile" accept="image/jpeg,image/webp,image/png">
+              <div class="hint">${esc(POPUP_SIZE_HINT)}</div>
+              <input class="input" id="puImage" placeholder="…or paste an https:// image URL" value="${esc(p.image_url || '')}" style="margin-top:8px"></div>
+            <div class="field"><label for="puRoute">Opens when tapped</label>
+              <input class="input" id="puRoute" value="${esc(p.route_url || '')}" placeholder="/shop, /shop/product/<id>, or https://…">
+              <span class="hint">An app screen such as /shop, or a web page. Leave empty for a picture only.</span></div>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="puStart">Show from</label><input class="input" type="datetime-local" id="puStart" value="${esc(toLocalInput(p.starts_at))}"></div>
+          <div class="field"><label for="puEnd">Show until</label><input class="input" type="datetime-local" id="puEnd" value="${esc(toLocalInput(p.ends_at))}"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="puActive" ${p.is_active ? 'checked' : ''}> Active (shown in the app)</label>`,
+      foot: '<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">Save pop-up</button>',
+      handlers: {
+        save: async (btn) => {
+          const fields = read();
+          if (!fields.title) { toast('Add a title.', 'warning'); return; }
+          if (!safeUrl(fields.image_url) || !/^https:\/\//i.test(fields.image_url)) { toast('Add a picture (upload one or paste an https:// URL).', 'warning'); return; }
+          if (fields.route_url && !/^(\/[A-Za-z0-9]|https:\/\/)/.test(fields.route_url)) { toast('“Opens” must be an app screen such as /shop, or an https:// link.', 'warning'); return; }
+          if (fields.starts_at && fields.ends_at && fields.ends_at <= fields.starts_at) { toast('“Show until” must be after “Show from”.', 'warning'); return; }
+          await busy(btn, async () => {
+            await act('popup.save', id, { popup: fields });
+            closeModal();
+            toast('Pop-up saved.', 'success');
+            renderCurrent();
+          });
+        },
+      },
+    });
+
+    const repaint = () => { $('#puPreview').innerHTML = popupPreview(read()); };
+    $('#puImage').addEventListener('change', repaint);
+    $('#puFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { toast('Use a JPG, WebP or PNG image.', 'warning'); return; }
+      if (file.size > 2 * 1024 * 1024) { toast('That image is over 2 MB. Please use a smaller one.', 'warning'); return; }
+      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[file.type];
+      const path = `popups/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
+      toast('Uploading picture…');
+      const { error } = await sb.storage.from('promo-banners').upload(path, file, { contentType: file.type, upsert: false });
+      if (error) { toast('Could not upload the picture.', 'error'); return; }
+      act('banner.image_uploaded', 'new', { path }).catch(() => {});
+      const { data } = sb.storage.from('promo-banners').getPublicUrl(path);
+      $('#puImage').value = data.publicUrl;
+      repaint();
+      // A gentle nudge when the shape is off: the app crops to 4 : 5.
+      const probe = new Image();
+      probe.onload = () => {
+        const ratio = probe.naturalWidth / probe.naturalHeight;
+        if (Math.abs(ratio - 0.8) > 0.06) {
+          toast(`Uploaded, but it is ${probe.naturalWidth} × ${probe.naturalHeight}. The app shows 4 : 5 (e.g. 1080 × 1350), so the edges will be cut.`, 'warning');
+        } else {
+          toast('Picture uploaded.', 'success');
+        }
+      };
+      probe.src = data.publicUrl;
+    });
+  };
+
+  ACTIONS['delete-popup'] = async (id, btn) => {
+    const p = popupRows.find((x) => x.id === id);
+    if (!p) return;
+    const ok = await confirmBox({ title: `Delete “${p.title}”?`, message: 'It will not be shown again. To pause it instead, edit it and turn Active off.', confirmLabel: 'Delete', tone: 'danger' });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      await act('popup.delete', id);
+      toast('Pop-up deleted.', 'success');
+      renderCurrent();
     });
   };
 
