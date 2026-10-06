@@ -1890,8 +1890,8 @@
   // Pop-ups (app_popups): one picture shown once when the app opens
   // ════════════════════════════════════════════════════════════════════════════
   let popupRows = [];
-  // Shown on the page and in the form; the app draws the picture at 4 : 5.
-  const POPUP_SIZE_HINT = 'Portrait, 1080 × 1350 px (4 : 5). JPG or WebP, ideally under 500 KB (2 MB at most). '
+  // Shown on the page and in the form; the app draws the picture at 9 : 16.
+  const POPUP_SIZE_HINT = 'Phone-screen shape, 1080 × 1920 px (9 : 16). JPG or WebP, ideally under 800 KB (2 MB at most). '
     + 'Keep words and logos away from the edges and the top-right corner, where the ✕ sits.';
 
   function popupPreview(p) {
@@ -1990,12 +1990,12 @@
       const { data } = sb.storage.from('promo-banners').getPublicUrl(path);
       $('#puImage').value = data.publicUrl;
       repaint();
-      // A gentle nudge when the shape is off: the app crops to 4 : 5.
+      // A gentle nudge when the shape is off: the app crops to 9 : 16.
       const probe = new Image();
       probe.onload = () => {
         const ratio = probe.naturalWidth / probe.naturalHeight;
-        if (Math.abs(ratio - 0.8) > 0.06) {
-          toast(`Uploaded, but it is ${probe.naturalWidth} × ${probe.naturalHeight}. The app shows 4 : 5 (e.g. 1080 × 1350), so the edges will be cut.`, 'warning');
+        if (Math.abs(ratio - 0.5625) > 0.05) {
+          toast(`Uploaded, but it is ${probe.naturalWidth} × ${probe.naturalHeight}. The app shows 9 : 16 (e.g. 1080 × 1920), so the edges will be cut.`, 'warning');
         } else {
           toast('Picture uploaded.', 'success');
         }

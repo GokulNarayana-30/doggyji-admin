@@ -365,10 +365,10 @@ html[data-env="staging"] body::before {
 .banner-preview .cta { align-self: flex-start; margin-top: 8px; background: #fff; color: #142C73; padding: 4px 12px; border-radius: 999px; font-size: 11px; font-weight: 800; font-family: var(--font-heading); }
 .banner-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; }
 .banner-meta .actions { margin-left: auto; display: flex; gap: 6px; }
-/* Pop-ups: drawn at 4 : 5, as the app shows them, with the ✕ where it sits. */
-.popup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+/* Pop-ups: drawn at 9 : 16, as the app shows them, with the ✕ where it sits. */
+.popup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
 .popup-card { overflow: hidden; display: flex; flex-direction: column; }
-.popup-preview { position: relative; aspect-ratio: 4 / 5; background: var(--slate-soft); display: grid; place-items: center; overflow: hidden; border-radius: var(--radius); }
+.popup-preview { position: relative; aspect-ratio: 9 / 16; background: var(--slate-soft); display: grid; place-items: center; overflow: hidden; border-radius: var(--radius); }
 .popup-card .popup-preview { border-radius: 0; }
 .popup-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .popup-x { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; display: grid; place-items: center; font-size: 14px; }
