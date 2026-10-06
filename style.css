@@ -130,6 +130,7 @@ button { font: inherit; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .check input { width: 16px; height: 16px; accent-color: var(--teal); }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px 12px; padding-top: 4px; }
 
 /* ── Auth screens ─────────────────────────────────────────────────────────── */
 .auth-screen {

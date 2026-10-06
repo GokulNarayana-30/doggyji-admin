@@ -1084,10 +1084,37 @@
           <div class="grow"><div class="cell-main">${esc(p.name)}</div><div class="cell-sub">${esc(p.breed || titleCase(p.species))}</div></div>
           <span class="cell-sub">${esc(fmtDate(p.created_at))}</span></div>`).join('')}</div>` : '<p class="note" style="margin:0">No pets added.</p>'}`,
       foot: can('users.manage')
-        ? (susp ? '<button class="btn btn-primary" data-action="m" data-id="restore">Restore account</button>'
-          : '<button class="btn btn-danger" data-action="m" data-id="suspend">Suspend account</button>')
+        ? `<button class="btn btn-ghost" data-action="m" data-id="erase" style="margin-right:auto;color:var(--red)">Delete account…</button>${
+          susp ? '<button class="btn btn-primary" data-action="m" data-id="restore">Restore account</button>'
+            : '<button class="btn btn-danger" data-action="m" data-id="suspend">Suspend account</button>'}`
         : '',
       handlers: {
+        erase: async (btn) => {
+          const who = u.full_name || (u.username ? `@${u.username}` : 'this person');
+          const reason = await confirmBox({
+            title: `Delete ${who}’s account for good?`,
+            message: 'Their login, profile, pets, chats, bookings, donor listings and photos are erased and cannot be brought back. Orders stay with Shopify. To stop someone for now, use Suspend instead.',
+            confirmLabel: 'Continue', tone: 'danger',
+            field: { label: 'Reason', required: true, placeholder: 'e.g. The person asked us to delete their account' },
+          });
+          if (reason == null) return;
+          const typed = await confirmBox({
+            title: 'Type DELETE to confirm',
+            message: `This erases ${who}’s account now.`,
+            confirmLabel: 'Delete account', tone: 'danger',
+            field: { label: 'Type DELETE', required: true, placeholder: 'DELETE' },
+          });
+          if (typed == null) return;
+          if (typed !== 'DELETE') { toast('Not deleted: type DELETE in capitals to confirm.', 'warning'); return; }
+          await busy(btn, async () => {
+            const r = (await act('user.delete', id, { reason, confirm: 'DELETE' })) || {};
+            closeModal();
+            toast(r.login_deletion === 'needs manual cleanup'
+              ? 'Account data erased, but the login could not be removed. Tell the developer.'
+              : 'Account deleted.', r.login_deletion === 'needs manual cleanup' ? 'warning' : 'success');
+            renderCurrent();
+          });
+        },
         suspend: async (btn) => {
           const reason = await confirmBox({
             title: 'Suspend this account?',
@@ -1387,7 +1414,9 @@
         <td>${statusBadge(r.verification_status)}</td>
         <td class="actions">${approve ? `
           ${r.verification_status !== 'approved' ? `<button class="btn btn-success btn-sm" data-action="set-listing" data-id="${esc(`${r.id}|approved`)}">Approve</button>` : ''}
-          ${r.verification_status !== 'rejected' ? `<button class="btn btn-outline btn-sm" data-action="set-listing" data-id="${esc(`${r.id}|rejected`)}">Reject</button>` : ''}` : ''}</td>
+          ${r.verification_status !== 'rejected' ? `<button class="btn btn-outline btn-sm" data-action="set-listing" data-id="${esc(`${r.id}|rejected`)}">Reject</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-action="edit-listing" data-id="${esc(r.id)}">Edit</button>
+          <button class="btn btn-ghost btn-sm" data-action="delete-listing" data-id="${esc(r.id)}">Remove</button>` : ''}</td>
       </tr>`).join('')}</tbody></table></div>`
       : emptyHtml('🏥', status === 'pending' ? 'Nothing waiting for review' : 'Nothing here', 'Users submit clinics from Vet Finder and blood banks from the Blood Bank screen.');
 
@@ -1395,8 +1424,113 @@
         ${tabsHtml('directory', 'kind', [['vet_clinics', 'Vet clinics'], ['blood_banks', 'Blood banks']], kind)}
         <span class="grow"></span>
         ${tabsHtml('directory', 'status', [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']], status, counts)}
+        ${approve ? `<button class="btn btn-primary" data-action="edit-listing" data-id="new">+ Add ${isClinic ? 'clinic' : 'blood bank'}</button>` : ''}
       </div><div class="card">${table}</div>
-      <p class="note">Approved listings are shown to everyone in the app; pending and rejected ones only to the person who submitted them.</p>`;
+      <p class="note">Approved listings are shown to everyone in the app; pending and rejected ones only to the person who submitted them. Listings added here are approved straight away.</p>`;
+  };
+
+  // The app's lists (vet_specialties.dart, blood_types.dart, Cities.popular):
+  // the app filters on exact values, so the form offers only these.
+  const VET_SPECIALTIES = ['General', 'Emergency', 'Dental', 'Grooming', '24hr', 'Surgery', 'Vaccination'];
+  const BANK_BLOOD_TYPES = ['DEA 1.1+', 'DEA 1.1-', 'DEA 1.2', 'DEA 3', 'DEA 4', 'DEA 5', 'DEA 7', 'A', 'B', 'AB'];
+  const APP_CITIES = ['Bengaluru', 'Mumbai', 'Delhi', 'Hyderabad', 'Chennai', 'Pune', 'Kolkata', 'Ahmedabad', 'Jaipur', 'Chandigarh', 'Kochi', 'Goa'];
+  // Same rule as the tables' maps_url check.
+  const MAPS_URL_RE = /^https:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|(www\.)?google\.[a-z.]{2,10}\/maps|maps\.google\.[a-z.]{2,10})(\/|\?)/i;
+
+  /** "12.97, 77.59" (or the @lat,lng in a long Maps link) → [lat, lng], else null. */
+  function parseLatLng(text) {
+    const m = String(text || '').match(/(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/);
+    if (!m) return null;
+    const lat = Number(m[1]); const lng = Number(m[2]);
+    return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? [lat, lng] : null;
+  }
+
+  ACTIONS['edit-listing'] = (id) => {
+    const kind = state.directory.kind;
+    const isClinic = kind === 'vet_clinics';
+    const what = isClinic ? 'clinic' : 'blood bank';
+    const r = id === 'new' ? { specialties: [], available_blood_types: [] } : directoryRows.find((x) => x.id === id);
+    if (!r) return;
+    const checks = (name, options, chosen) => `<div class="check-grid">${options.map((o) => `
+      <label class="check"><input type="checkbox" name="${esc(name)}" value="${esc(o)}" ${(chosen || []).includes(o) ? 'checked' : ''}> ${esc(o)}</label>`).join('')}</div>`;
+    const where = r.lat != null && r.lng != null ? `${r.lat}, ${r.lng}` : '';
+
+    openModal({
+      title: id === 'new' ? `Add a ${what}` : `Edit ${r.name}`,
+      subtitle: id === 'new' ? 'Shown in the app straight away.' : '',
+      wide: true,
+      body: `
+        <div class="field-row">
+          <div class="field"><label for="lsName">Name *</label><input class="input" id="lsName" maxlength="120" value="${esc(r.name || '')}"></div>
+          <div class="field"><label for="lsCity">City *</label><input class="input" id="lsCity" maxlength="80" list="lsCities" value="${esc(r.city || '')}">
+            <datalist id="lsCities">${APP_CITIES.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+            <span class="hint">Use the app’s spelling, e.g. Bengaluru, so it appears under that city.</span></div>
+        </div>
+        <div class="field"><label for="lsAddress">Address${isClinic ? ' *' : ''}</label><input class="input" id="lsAddress" maxlength="300" value="${esc(r.address || '')}"></div>
+        <div class="field-row">
+          <div class="field"><label for="lsPhone">Phone</label><input class="input" id="lsPhone" maxlength="30" value="${esc(r.phone || '')}" placeholder="+91 …"></div>
+          ${isClinic ? `<div class="field"><label for="lsHours">Opening hours</label><input class="input" id="lsHours" maxlength="120" value="${esc(r.operating_hours || '')}" placeholder="Mon–Sat 9 am – 8 pm"></div>`
+    : `<div class="field" style="justify-content:flex-end"><label class="check"><input type="checkbox" id="ls24" ${r.is_24_hours ? 'checked' : ''}> Open 24 hours</label></div>`}
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="lsMaps">Google Maps link</label><input class="input" id="lsMaps" maxlength="500" value="${esc(r.maps_url || '')}" placeholder="https://maps.app.goo.gl/…"></div>
+          <div class="field"><label for="lsWhere">Location (latitude, longitude)</label><input class="input" id="lsWhere" value="${esc(where)}" placeholder="12.9716, 77.5946">
+            <span class="hint">In Google Maps, long-press the place and copy the numbers. Used for “nearest first”.</span></div>
+        </div>
+        <div class="field"><label>${isClinic ? 'Specialties *' : 'Blood types in stock'}</label>
+          ${isClinic ? checks('lsSpec', VET_SPECIALTIES, r.specialties) : checks('lsBlood', BANK_BLOOD_TYPES, r.available_blood_types)}</div>
+        ${!isClinic && id !== 'new' ? `<label class="check"><input type="checkbox" id="lsChecked"> I checked the stock with the bank today</label>
+          <div class="hint">Stock last updated ${esc(fmtDate(r.stock_updated_at))}. Changing the blood types updates it anyway.</div>` : ''}`,
+      foot: `<button class="btn btn-ghost" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="m" data-id="save">${id === 'new' ? `Add ${what}` : 'Save changes'}</button>`,
+      handlers: {
+        save: async (btn) => {
+          const val = (sel) => $(sel).value.trim();
+          const picked = (name) => [...document.querySelectorAll(`#modalRoot input[name="${name}"]:checked`)].map((x) => x.value);
+          const whereText = val('#lsWhere');
+          const ll = whereText ? parseLatLng(whereText) : null;
+          const listing = {
+            name: val('#lsName'), city: val('#lsCity'), address: val('#lsAddress'), phone: val('#lsPhone'),
+            maps_url: val('#lsMaps'), lat: ll ? ll[0] : null, lng: ll ? ll[1] : null,
+          };
+          if (isClinic) {
+            listing.operating_hours = val('#lsHours');
+            listing.specialties = picked('lsSpec');
+          } else {
+            listing.is_24_hours = $('#ls24').checked;
+            listing.available_blood_types = picked('lsBlood');
+            listing.stock_checked = Boolean(document.getElementById('lsChecked')?.checked);
+          }
+          if (!listing.name || !listing.city) { toast('Add a name and a city.', 'warning'); return; }
+          if (isClinic && !listing.address) { toast('Add the clinic’s address.', 'warning'); return; }
+          if (isClinic && !listing.specialties.length) { toast('Choose at least one specialty.', 'warning'); return; }
+          if (listing.maps_url && !MAPS_URL_RE.test(listing.maps_url)) { toast('The Maps link must be a Google Maps link (https://maps.app.goo.gl/…).', 'warning'); return; }
+          if (whereText && !ll) { toast('Location should look like 12.9716, 77.5946.', 'warning'); return; }
+          await busy(btn, async () => {
+            await act('directory.save', id, { kind, listing });
+            closeModal();
+            toast(id === 'new' ? `${titleCase(what)} added.` : 'Changes saved.', 'success');
+            if (id === 'new') state.directory.status = 'approved';
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
+
+  ACTIONS['delete-listing'] = async (id, btn) => {
+    const r = directoryRows.find((x) => x.id === id);
+    if (!r) return;
+    const ok = await confirmBox({
+      title: `Remove “${r.name}”?`,
+      message: 'It is deleted for good and disappears from the app. To hide it for now instead, use Reject.',
+      confirmLabel: 'Remove', tone: 'danger',
+    });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      await act('directory.delete', id, { kind: state.directory.kind });
+      toast('Listing removed.', 'success');
+      renderCurrent(); refreshCounts();
+    });
   };
 
   ACTIONS['set-listing'] = async (id, btn) => {
