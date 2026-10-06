@@ -1894,10 +1894,13 @@
   const POPUP_SIZE_HINT = 'Phone-screen shape, 1080 × 1920 px (9 : 16). JPG or WebP, ideally under 800 KB (2 MB at most). '
     + 'Keep words and logos away from the edges and the top-right corner, where the ✕ sits.';
 
-  function popupPreview(p) {
+  // The ✕ marks where the app puts its close button. Only in the editor, and
+  // labelled: on the list it looked like a delete button that did nothing.
+  function popupPreview(p, { showClose = false } = {}) {
     const img = safeUrl(p.image_url);
     return `<div class="popup-preview">${img ? `<img src="${esc(img)}" alt="">` : '<span class="cell-sub">No picture yet</span>'}
-      <span class="popup-x" aria-hidden="true">✕</span></div>`;
+      ${showClose ? '<span class="popup-x" aria-hidden="true" title="Where the app shows its close button">✕</span>' : ''}</div>
+      ${showClose ? '<div class="hint" style="margin-top:6px">✕ shows where the app puts its close button. Keep text away from that corner.</div>' : ''}`;
   }
 
   RENDER.popups = async () => {
@@ -1938,7 +1941,7 @@
       wide: true,
       body: `
         <div class="popup-edit">
-          <div id="puPreview">${popupPreview(p)}</div>
+          <div id="puPreview">${popupPreview(p, { showClose: true })}</div>
           <div class="grow">
             <div class="field"><label for="puTitle">Title * <span class="hint">(for staff, and read aloud to blind users)</span></label>
               <input class="input" id="puTitle" maxlength="80" value="${esc(p.title)}" placeholder="e.g. Diwali sale: 20% off treats"></div>
@@ -1974,7 +1977,7 @@
       },
     });
 
-    const repaint = () => { $('#puPreview').innerHTML = popupPreview(read()); };
+    const repaint = () => { $('#puPreview').innerHTML = popupPreview(read(), { showClose: true }); };
     $('#puImage').addEventListener('change', repaint);
     $('#puFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];

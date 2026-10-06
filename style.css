@@ -371,7 +371,7 @@ html[data-env="staging"] body::before {
 .popup-preview { position: relative; aspect-ratio: 9 / 16; background: var(--slate-soft); display: grid; place-items: center; overflow: hidden; border-radius: var(--radius); }
 .popup-card .popup-preview { border-radius: 0; }
 .popup-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.popup-x { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; display: grid; place-items: center; font-size: 14px; }
+.popup-x { pointer-events: none; cursor: default; position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; display: grid; place-items: center; font-size: 14px; }
 .popup-edit { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
 .popup-edit #puPreview { width: 180px; flex: none; }
 @media (max-width: 640px) { .popup-edit { flex-direction: column; } .popup-edit #puPreview { width: 100%; max-width: 260px; } }
