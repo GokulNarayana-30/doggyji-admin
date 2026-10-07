@@ -1749,6 +1749,127 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════════
+  // "Opens" picker for banners and pop-ups: an app screen, a shop product, a web
+  // page or nothing. Stores the same route_url string the app already reads
+  // (an app path, opened with context.push, or an https:// link).
+  // ════════════════════════════════════════════════════════════════════════════
+  const LINK_SCREENS = [
+    ['/shop', 'Shop'],
+    ['/subscriptions', 'Subscriptions'],
+    ['/lost-found', 'Lost & Found'],
+    ['/pet-services', 'Pet Services'],
+    ['/pet-care/vets', 'Vet Finder'],
+    ['/blood-bank', 'Blood Bank'],
+    ['/pet-match', 'Pet Match'],
+    ['/my-pet', 'My pets'],
+    ['/account/orders', 'My orders'],
+    ['/doggyji', 'Doggy Ji chat'],
+    ['/home', 'Home'],
+  ];
+  // Uses SHOP_ENDPOINT / SHOP_TOKEN (Promotions, below): the shop's public,
+  // read-only catalog.
+  let shopProductsCache = null;
+
+  /** The store's products as [numeric id, title], loaded once. */
+  async function shopProducts() {
+    if (shopProductsCache) return shopProductsCache;
+    const res = await fetch(SHOP_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Storefront-Access-Token': SHOP_TOKEN },
+      body: JSON.stringify({ query: '{ products(first: 250, sortKey: TITLE) { nodes { id title availableForSale } } }' }),
+    });
+    const body = await res.json();
+    const nodes = body?.data?.products?.nodes;
+    if (!res.ok || !Array.isArray(nodes)) throw new Error('Could not load the shop products.');
+    // The app's product page is /shop/<numeric id> (gid://shopify/Product/123 → 123).
+    shopProductsCache = nodes.map((n) => [String(n.id).split('/').pop(), n.title + (n.availableForSale ? '' : ' (sold out)')]);
+    return shopProductsCache;
+  }
+
+  /** Which kind of link a stored route_url is. */
+  function linkKind(v) {
+    if (!v) return { kind: '' };
+    if (LINK_SCREENS.some(([path]) => path === v)) return { kind: v };
+    const m = /^\/shop\/(\d+)$/.exec(v);
+    if (m) return { kind: '__product', product: m[1] };
+    if (/^https:\/\//i.test(v)) return { kind: '__web', web: v };
+    return { kind: '__other', other: v };
+  }
+
+  /** The picker's fields; `noneLabel` names the "opens nothing" choice. */
+  function linkPickerHtml(prefix, value, noneLabel) {
+    const k = linkKind(value);
+    const o = (val, label) => `<option value="${esc(val)}" ${k.kind === val ? 'selected' : ''}>${esc(label)}</option>`;
+    return `<select class="select" id="${prefix}Kind">
+        ${o('', noneLabel)}
+        <optgroup label="App screens">${LINK_SCREENS.map(([path, label]) => o(path, label)).join('')}</optgroup>
+        <optgroup label="More">${o('__product', 'A product…')}${o('__web', 'A web page…')}${k.kind === '__other' ? o('__other', `Other: ${k.other}`) : ''}</optgroup>
+      </select>
+      <div id="${prefix}ProductWrap" ${k.kind === '__product' ? '' : 'hidden'} style="margin-top:8px">
+        <input class="input" id="${prefix}ProductFind" placeholder="Search products">
+        <select class="select" id="${prefix}Product" size="6" style="margin-top:6px;height:auto">
+          ${k.product ? `<option value="${esc(k.product)}" selected>Product ${esc(k.product)}</option>` : ''}</select>
+        <span class="hint" id="${prefix}ProductNote">Loading the shop's products…</span>
+      </div>
+      <input class="input" id="${prefix}Web" ${k.kind === '__web' ? '' : 'hidden'} style="margin-top:8px" placeholder="https://www.doggyji.com/…" value="${esc(k.web || '')}">
+      <input type="hidden" id="${prefix}Other" value="${esc(k.other || '')}">`;
+  }
+
+  /** Shows the right extra field and loads products when needed. */
+  function linkPickerWire(prefix, onChange = () => {}) {
+    const kind = document.getElementById(`${prefix}Kind`);
+    const wrap = document.getElementById(`${prefix}ProductWrap`);
+    const web = document.getElementById(`${prefix}Web`);
+    const list = document.getElementById(`${prefix}Product`);
+    const find = document.getElementById(`${prefix}ProductFind`);
+    const note = document.getElementById(`${prefix}ProductNote`);
+    let all = [];
+    const fill = () => {
+      const q = find.value.trim().toLowerCase();
+      const keep = list.value;
+      const rows = all.filter(([, title]) => !q || title.toLowerCase().includes(q));
+      list.innerHTML = rows.map(([id, title]) => `<option value="${esc(id)}" ${id === keep ? 'selected' : ''}>${esc(title)}</option>`).join('');
+      note.textContent = rows.length ? `${rows.length} product${rows.length === 1 ? '' : 's'}. Pick one.` : 'No product matches.';
+    };
+    const load = async () => {
+      if (all.length) return;
+      try {
+        all = await shopProducts();
+        fill();
+      } catch (e) {
+        note.textContent = 'Could not load the shop products. Check the connection and pick "A product…" again.';
+      }
+    };
+    const sync = () => {
+      wrap.hidden = kind.value !== '__product';
+      web.hidden = kind.value !== '__web';
+      if (kind.value === '__product') load();
+      onChange();
+    };
+    kind.addEventListener('change', sync);
+    find.addEventListener('input', fill);
+    list.addEventListener('change', onChange);
+    web.addEventListener('input', onChange);
+    if (kind.value === '__product') load();
+  }
+
+  /** The route_url to save, or an error message. */
+  function linkPickerRead(prefix) {
+    const kind = document.getElementById(`${prefix}Kind`).value;
+    if (kind === '') return { value: null };
+    if (kind === '__product') {
+      const id = document.getElementById(`${prefix}Product`).value;
+      return id ? { value: `/shop/${id}` } : { error: 'Pick a product, or choose another option under "Opens".' };
+    }
+    if (kind === '__web') {
+      const url = document.getElementById(`${prefix}Web`).value.trim();
+      return /^https:\/\/[^\s]+\.[^\s]+/i.test(url) ? { value: url } : { error: 'Enter a web address starting with https://' };
+    }
+    if (kind === '__other') return { value: document.getElementById(`${prefix}Other`).value || null };
+    return { value: kind };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
   // Home banners
   // ════════════════════════════════════════════════════════════════════════════
   let bannerRows = [];
@@ -1804,7 +1925,7 @@
       subtitle: $('#bnSubtitle').value.trim() || null,
       image_url: $('#bnImage').value.trim(),
       cta_text: $('#bnCta').value.trim() || null,
-      route_url: $('#bnRoute').value.trim() || null,
+      route_url: linkPickerRead('bnRoute').value ?? null,
       background_color: $('#bnBg').value,
       text_color: $('#bnFg').value,
       sort_order: Number($('#bnOrder').value) || 0,
@@ -1829,8 +1950,7 @@
           <input class="input" id="bnImage" placeholder="…or paste an https:// image URL" value="${esc(b.image_url || '')}" style="margin-top:8px"></div>
         <div class="field-row">
           <div class="field"><label for="bnCta">Button text</label><input class="input" id="bnCta" maxlength="24" value="${esc(b.cta_text || '')}"></div>
-          <div class="field"><label for="bnRoute">Opens</label><input class="input" id="bnRoute" value="${esc(b.route_url || '')}" placeholder="/shop or /shop/product/<id>">
-            <span class="hint">An app screen path, e.g. /shop</span></div>
+          <div class="field"><label for="bnRouteKind">Button opens</label>${linkPickerHtml('bnRoute', b.route_url || '', 'Nothing (no button)')}</div>
         </div>
         <div class="field-row">
           <div class="field"><label for="bnBg">Background colour</label><input class="input" type="color" id="bnBg" value="${esc(b.background_color || '#142C73')}" style="height:42px;padding:4px"></div>
@@ -1848,6 +1968,8 @@
       handlers: {
         save: async (btn) => {
           const fields = read();
+          const link = linkPickerRead('bnRoute');
+          if (link.error) { toast(link.error, 'warning'); return; }
           if (!fields.title) { toast('Add a title.', 'warning'); return; }
           if (!safeUrl(fields.image_url)) { toast('Add an image (upload one or paste an https:// URL).', 'warning'); return; }
           if (fields.starts_at && fields.ends_at && fields.ends_at <= fields.starts_at) { toast('“Show until” must be after “Show from”.', 'warning'); return; }
@@ -1862,6 +1984,7 @@
     });
 
     const repaint = () => { $('#bnPreview').innerHTML = bannerPreview(read()); };
+    linkPickerWire('bnRoute');
     ['bnTitle', 'bnSubtitle', 'bnCta', 'bnBg', 'bnFg', 'bnImage'].forEach((f) => document.getElementById(f).addEventListener('input', repaint));
     const setThumb = (url) => { $('#bnThumb').src = url; $('#bnThumb').hidden = !url; };
     $('#bnImage').addEventListener('change', () => setThumb(safeUrl($('#bnImage').value.trim())));
@@ -1930,7 +2053,7 @@
     const read = () => ({
       title: $('#puTitle').value.trim(),
       image_url: $('#puImage').value.trim(),
-      route_url: $('#puRoute').value.trim() || null,
+      route_url: linkPickerRead('puRoute').value ?? null,
       is_active: $('#puActive').checked,
       starts_at: $('#puStart').value ? new Date($('#puStart').value).toISOString() : null,
       ends_at: $('#puEnd').value ? new Date($('#puEnd').value).toISOString() : null,
@@ -1949,9 +2072,7 @@
               <input type="file" id="puFile" accept="image/jpeg,image/webp,image/png">
               <div class="hint">${esc(POPUP_SIZE_HINT)}</div>
               <input class="input" id="puImage" placeholder="…or paste an https:// image URL" value="${esc(p.image_url || '')}" style="margin-top:8px"></div>
-            <div class="field"><label for="puRoute">Opens when tapped</label>
-              <input class="input" id="puRoute" value="${esc(p.route_url || '')}" placeholder="/shop, /shop/product/<id>, or https://…">
-              <span class="hint">An app screen such as /shop, or a web page. Leave empty for a picture only.</span></div>
+            <div class="field"><label for="puRouteKind">Opens when tapped</label>${linkPickerHtml('puRoute', p.route_url || '', 'Nothing (picture only)')}</div>
           </div>
         </div>
         <div class="field-row">
@@ -1963,6 +2084,8 @@
       handlers: {
         save: async (btn) => {
           const fields = read();
+          const link = linkPickerRead('puRoute');
+          if (link.error) { toast(link.error, 'warning'); return; }
           if (!fields.title) { toast('Add a title.', 'warning'); return; }
           if (!safeUrl(fields.image_url) || !/^https:\/\//i.test(fields.image_url)) { toast('Add a picture (upload one or paste an https:// URL).', 'warning'); return; }
           if (fields.route_url && !/^(\/[A-Za-z0-9]|https:\/\/)/.test(fields.route_url)) { toast('“Opens” must be an app screen such as /shop, or an https:// link.', 'warning'); return; }
@@ -1979,6 +2102,7 @@
 
     const repaint = () => { $('#puPreview').innerHTML = popupPreview(read(), { showClose: true }); };
     $('#puImage').addEventListener('change', repaint);
+    linkPickerWire('puRoute');
     $('#puFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
