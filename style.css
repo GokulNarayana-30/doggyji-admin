@@ -458,3 +458,6 @@ html[data-env="staging"] body::before {
 .suggest-line.cell-sub { font-size: 12px; }
 .suggest-handle { color: var(--teal); font-weight: 600; }
 .suggest-empty { padding: 10px 12px; font-size: 13px; color: var(--text-3); }
+
+/* Previous / Next under long lists. */
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }

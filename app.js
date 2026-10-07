@@ -127,6 +127,31 @@
     return count !== undefined && count !== null && data === null ? count : data;
   }
 
+  // Long lists come in pages of PAGE_SIZE with Previous / Next, so every row
+  // can be reached (Orders used to stop at the newest 200).
+  const PAGE_SIZE = 100;
+
+  /** Runs `builder` for one page; returns { rows, total }. */
+  async function pageOf(builder, page) {
+    const from = page * PAGE_SIZE;
+    const { data, error, count } = await builder.range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    return { rows: data || [], total: count ?? 0 };
+  }
+
+  function pagerHtml(view, page, total) {
+    if (!total) return '';
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    const first = page * PAGE_SIZE + 1;
+    const last = Math.min(total, (page + 1) * PAGE_SIZE);
+    const fmt = (n) => Number(n).toLocaleString('en-IN');
+    return `<div class="pager"><span class="cell-sub">Showing ${esc(fmt(first))}–${esc(fmt(last))} of ${esc(fmt(total))}</span>
+      <span class="grow"></span>
+      <button class="btn btn-outline btn-sm" data-action="page" data-id="${esc(`${view}|${page - 1}`)}" ${page <= 0 ? 'disabled' : ''}>← Previous</button>
+      <span class="cell-sub">Page ${esc(page + 1)} of ${esc(pages)}</span>
+      <button class="btn btn-outline btn-sm" data-action="page" data-id="${esc(`${view}|${page + 1}`)}" ${page >= pages - 1 ? 'disabled' : ''}>Next →</button></div>`;
+  }
+
   async function countOf(table, apply = (b) => b) {
     const { count, error } = await apply(sb.from(table).select('*', { count: 'exact', head: true }));
     if (error) return null;
@@ -517,13 +542,13 @@
   // ── Views registry and router ──────────────────────────────────────────────
   const state = {
     reports: { status: 'open' },
-    users: { filter: 'all', q: '' },
+    users: { filter: 'all', q: '', page: 0 },
     providers: { status: 'pending' },
     bookings: { status: 'all' },
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
     lost: { status: 'open' },
-    orders: { q: '', source: 'all' },
+    orders: { q: '', source: 'all', page: 0 },
     support: { status: 'open' },
     audit: { result: 'all', q: '' },
   };
@@ -671,9 +696,15 @@
     filter: (id) => {
       const [view, key, value] = id.split('|');
       state[view][key] = value;
+      if ('page' in state[view]) state[view].page = 0;
       if (view === 'directory' && key === 'kind') state.directory.status = 'pending';
       if (view === 'blood' && key === 'tab') state.blood.status = value === 'requests' ? 'active' : 'open';
       renderCurrent();
+    },
+    page: (id) => {
+      const [view, n] = id.split('|');
+      state[view].page = Math.max(0, Number(n) || 0);
+      renderCurrent().then(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
     },
   };
 
@@ -1011,12 +1042,12 @@
     const suspensions = await q(sb.from('user_suspensions').select('*'));
     const suspended = Object.fromEntries(suspensions.map((s) => [s.user_id, s]));
 
-    let query = sb.from('profiles').select('id, full_name, username, email, phone, avatar_url, city, created_at')
-      .order('created_at', { ascending: false }).limit(200);
+    let query = sb.from('profiles').select('id, full_name, username, email, phone, avatar_url, city, created_at', { count: 'exact' })
+      .order('created_at', { ascending: false });
     const term = search.replace(/[,()%*]/g, ' ').trim();
     if (term) query = query.or(['full_name', 'username', 'email', 'phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
     if (filter === 'suspended') query = query.in('id', suspensions.length ? suspensions.map((s) => s.user_id) : ['-']);
-    const rows = await q(query);
+    const { rows, total } = await pageOf(query, state.users.page || 0);
 
     const toolbar = `<div class="toolbar">
       ${tabsHtml('users', 'filter', [['all', 'All'], ['suspended', 'Suspended']], filter, { suspended: suspensions.length })}
@@ -1036,7 +1067,7 @@
       </tr>`).join('')}</tbody></table></div>`
       : emptyHtml('👤', term ? 'No matching users' : 'No users yet', term ? 'Try a different name, username, email or phone.' : 'People who sign up in the app appear here.');
 
-    return `${toolbar}<div class="card">${table}</div>${rows.length >= 200 ? '<p class="note">Showing the 200 most recent matches. Search to narrow down.</p>' : ''}`;
+    return `${toolbar}<div class="card">${table}</div>${pagerHtml('users', state.users.page || 0, total)}`;
   };
 
   AFTER.users = () => {
@@ -1044,6 +1075,7 @@
     if (!input) return;
     input.addEventListener('input', debounce(() => {
       state.users.q = input.value;
+      state.users.page = 0;
       renderCurrent().then(() => {
         const again = document.getElementById('userSearch');
         if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
@@ -2750,10 +2782,10 @@
   RENDER.orders = async () => {
     const term = state.orders.q.replace(/[,()%*]/g, ' ').trim();
     const source = state.orders.source || 'all';
-    let query = bySource(source)(sb.from('orders').select('*')).order('placed_at', { ascending: false }).limit(200);
+    let query = bySource(source)(sb.from('orders').select('*', { count: 'exact' })).order('placed_at', { ascending: false });
     if (term) query = query.or(['id', 'shopify_order_id', 'customer_name', 'customer_email', 'customer_phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
-    const [rows, st, nAll, nApp, nWeb] = await Promise.all([
-      q(query),
+    const [{ rows, total }, st, nAll, nApp, nWeb] = await Promise.all([
+      pageOf(query, state.orders.page || 0),
       orderSourceStats(),
       countOf('orders'),
       countOf('orders', bySource('app')),
@@ -2782,7 +2814,7 @@
       ${tabsHtml('orders', 'source', [['all', 'All'], ['app', '📱 App'], ['web', '🌐 Website']], source, { all: nAll, app: nApp, web: nWeb })}
       <input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(state.orders.q)}">
       <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div><div class="card">${table}</div>
-      ${rows.length >= 200 ? '<p class="note">Showing the 200 most recent. Search or filter to narrow down.</p>' : ''}`;
+      ${pagerHtml('orders', state.orders.page || 0, total)}`;
   };
 
   AFTER.orders = () => {
@@ -2790,6 +2822,7 @@
     if (!input) return;
     input.addEventListener('input', debounce(() => {
       state.orders.q = input.value;
+      state.orders.page = 0;
       renderCurrent().then(() => {
         const again = document.getElementById('orderSearch');
         if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
