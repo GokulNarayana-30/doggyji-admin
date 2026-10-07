@@ -523,7 +523,7 @@
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
     lost: { status: 'open' },
-    orders: { q: '' },
+    orders: { q: '', source: 'all' },
     support: { status: 'open' },
     audit: { result: 'all', q: '' },
   };
@@ -2633,16 +2633,53 @@
   // ════════════════════════════════════════════════════════════════════════════
   let orderRows = [];
 
+  // An order placed in the app carries the checkout_intent the app attached at
+  // checkout (shopify-order-webhook claims it); website orders never do.
+  const fromApp = (o) => o.checkout_intent_id != null;
+  const sourceBadge = (o) => (fromApp(o) ? badge('📱 App', 'teal') : badge('🌐 Website', 'slate'));
+  const bySource = (source) => (b) => (source === 'app' ? b.not('checkout_intent_id', 'is', null)
+    : source === 'web' ? b.is('checkout_intent_id', null) : b);
+
+  /** This month's and all-time app vs website figures (cancelled orders left out). */
+  async function orderSourceStats() {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const [month, appAll, webAll] = await Promise.all([
+      q(sb.from('orders').select('total_amount, checkout_intent_id, status').gte('placed_at', monthStart).neq('status', 'cancelled').limit(5000)),
+      countOf('orders', (b) => bySource('app')(b).neq('status', 'cancelled')),
+      countOf('orders', (b) => bySource('web')(b).neq('status', 'cancelled')),
+    ]);
+    const sum = (rows) => rows.reduce((s, o) => s + Number(o.total_amount || 0), 0);
+    const app = month.filter(fromApp);
+    const web = month.filter((o) => !fromApp(o));
+    return { app: app.length, appRev: sum(app), web: web.length, webRev: sum(web), appAll, webAll,
+      share: month.length ? Math.round((app.length * 100) / month.length) : 0,
+      monthName: now.toLocaleString('en-IN', { month: 'long' }) };
+  }
+
   RENDER.orders = async () => {
     const term = state.orders.q.replace(/[,()%*]/g, ' ').trim();
-    let query = sb.from('orders').select('*').order('placed_at', { ascending: false }).limit(200);
+    const source = state.orders.source || 'all';
+    let query = bySource(source)(sb.from('orders').select('*')).order('placed_at', { ascending: false }).limit(200);
     if (term) query = query.or(['id', 'shopify_order_id', 'customer_name', 'customer_email', 'customer_phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
-    const rows = await q(query);
+    const [rows, st, nAll, nApp, nWeb] = await Promise.all([
+      q(query),
+      orderSourceStats(),
+      countOf('orders'),
+      countOf('orders', bySource('app')),
+      countOf('orders', bySource('web')),
+    ]);
     orderRows = rows;
+    const metrics = `<div class="metrics">
+      <div class="metric"><span class="metric-label">📱 App orders · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.app)}</span><span class="metric-sub">${esc(money(st.appRev))} · ${esc(st.appAll)} all time</span></div>
+      <div class="metric"><span class="metric-label">🌐 Website orders · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.web)}</span><span class="metric-sub">${esc(money(st.webRev))} · ${esc(st.webAll)} all time</span></div>
+      <div class="metric"><span class="metric-label">📊 App share · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.share)}%</span><span class="metric-sub">of this month's orders (cancelled left out)</span></div>
+    </div>`;
     const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
-      <th>Order</th><th>Customer</th><th>Placed</th><th>Total</th><th>Status</th><th class="hide-sm">Account</th><th></th></tr></thead><tbody>
+      <th>Order</th><th>Source</th><th>Customer</th><th>Placed</th><th>Total</th><th>Status</th><th class="hide-sm">Account</th><th></th></tr></thead><tbody>
       ${rows.map((o) => `<tr>
         <td><div class="cell-main">${esc(o.id)}</div>${o.coupon_code ? `<div class="cell-sub">Coupon ${esc(o.coupon_code)}</div>` : ''}</td>
+        <td>${sourceBadge(o)}</td>
         <td><div>${esc(o.customer_name || '—')}</div><div class="cell-sub">${esc(o.customer_email || o.customer_phone || '')}</div></td>
         <td class="nowrap">${esc(fmtDateTime(o.placed_at))}</td>
         <td>${esc(money(o.total_amount))}</td>
@@ -2650,9 +2687,12 @@
         <td class="hide-sm">${o.user_id ? badge('Linked', 'teal') : '<span class="cell-sub">Guest</span>'}</td>
         <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-order" data-id="${esc(o.id)}">View</button></td>
       </tr>`).join('')}</tbody></table></div>`
-      : emptyHtml('📦', term ? 'No matching orders' : 'No orders yet', term ? 'Try an order number, name, email or phone.' : 'Shopify orders appear here once the order webhook records them.');
-    return `<div class="toolbar"><input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(state.orders.q)}">
-      <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div><div class="card">${table}</div>`;
+      : emptyHtml('📦', term || source !== 'all' ? 'No matching orders' : 'No orders yet', term ? 'Try an order number, name, email or phone.' : source === 'app' ? 'No order has been placed in the app yet.' : 'Shopify orders appear here once the order webhook records them.');
+    return `${metrics}<div class="toolbar">
+      ${tabsHtml('orders', 'source', [['all', 'All'], ['app', '📱 App'], ['web', '🌐 Website']], source, { all: nAll, app: nApp, web: nWeb })}
+      <input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(state.orders.q)}">
+      <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div><div class="card">${table}</div>
+      ${rows.length >= 200 ? '<p class="note">Showing the 200 most recent. Search or filter to narrow down.</p>' : ''}`;
   };
 
   AFTER.orders = () => {
@@ -2673,7 +2713,7 @@
     const { data: items } = await sb.from('order_items').select('*').eq('order_id', o.id);
     openModal({
       title: `Order ${o.id}`,
-      subtitle: `Placed ${fmtDateTime(o.placed_at)} · ${titleCase(o.status || '')}`,
+      subtitle: `Placed ${fmtDateTime(o.placed_at)} · ${titleCase(o.status || '')} · ${fromApp(o) ? 'Placed in the app' : 'Placed on the website'}`,
       wide: true,
       body: `
         <div class="detail-grid">
