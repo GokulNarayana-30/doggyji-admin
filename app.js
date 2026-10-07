@@ -132,18 +132,18 @@
   const PAGE_SIZE = 100;
 
   /** Runs `builder` for one page; returns { rows, total }. */
-  async function pageOf(builder, page) {
-    const from = page * PAGE_SIZE;
-    const { data, error, count } = await builder.range(from, from + PAGE_SIZE - 1);
+  async function pageOf(builder, page, size = PAGE_SIZE) {
+    const from = page * size;
+    const { data, error, count } = await builder.range(from, from + size - 1);
     if (error) throw error;
     return { rows: data || [], total: count ?? 0 };
   }
 
-  function pagerHtml(view, page, total) {
+  function pagerHtml(view, page, total, size = PAGE_SIZE) {
     if (!total) return '';
-    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    const first = page * PAGE_SIZE + 1;
-    const last = Math.min(total, (page + 1) * PAGE_SIZE);
+    const pages = Math.max(1, Math.ceil(total / size));
+    const first = page * size + 1;
+    const last = Math.min(total, (page + 1) * size);
     const fmt = (n) => Number(n).toLocaleString('en-IN');
     return `<div class="pager"><span class="cell-sub">Showing ${esc(fmt(first))}–${esc(fmt(last))} of ${esc(fmt(total))}</span>
       <span class="grow"></span>
@@ -210,8 +210,8 @@
     ).join('')}</div>`;
   }
 
-  function download(filename, text) {
-    const blob = new Blob([text], { type: 'application/json' });
+  function download(filename, text, type = 'application/json') {
+    const blob = new Blob([text], { type });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -548,7 +548,7 @@
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
     lost: { status: 'open' },
-    orders: { q: '', source: 'all', page: 0 },
+    orders: { q: '', source: 'all', page: 0, size: 100, range: 'all', from: '', to: '', status: '', sort: 'new' },
     support: { status: 'open' },
     audit: { result: 'all', q: '' },
   };
@@ -2779,24 +2779,98 @@
       monthName: now.toLocaleString('en-IN', { month: 'long' }) };
   }
 
+  const ORDER_STATUSES = [['', 'All statuses'], ['placed', 'Placed'], ['shipped', 'Shipped'],
+    ['outForDelivery', 'Out for delivery'], ['delivered', 'Delivered'], ['cancelled', 'Cancelled']];
+  const ORDER_RANGES = [['all', 'All time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['7d', 'Last 7 days'],
+    ['30d', 'Last 30 days'], ['month', 'This month'], ['lastmonth', 'Last month'], ['custom', 'Custom dates…']];
+  const ORDER_SORTS = [['new', 'Newest first'], ['old', 'Oldest first'], ['high', 'Highest total'], ['low', 'Lowest total']];
+  const PAGE_SIZES = [25, 50, 100, 150, 200];
+
+  /** [from, to) of the chosen date range, in the browser's time zone; nulls = open. */
+  function orderRange(f) {
+    const now = new Date();
+    const day = (d, plus = 0) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + plus);
+    const today = day(now);
+    switch (f.range) {
+      case 'today': return [today, day(now, 1)];
+      case 'yesterday': return [day(now, -1), today];
+      case '7d': return [day(now, -6), day(now, 1)];
+      case '30d': return [day(now, -29), day(now, 1)];
+      case 'month': return [new Date(now.getFullYear(), now.getMonth(), 1), day(now, 1)];
+      case 'lastmonth': return [new Date(now.getFullYear(), now.getMonth() - 1, 1), new Date(now.getFullYear(), now.getMonth(), 1)];
+      case 'custom': {
+        const parse = (s) => { const [y, m, d] = (s || '').split('-').map(Number); return y ? new Date(y, m - 1, d) : null; };
+        const from = parse(f.from);
+        const to = parse(f.to);
+        return [from, to ? day(to, 1) : null];
+      }
+      default: return [null, null];
+    }
+  }
+
+  /** Every filter except the source tab (the tabs count within the others). */
+  function orderFilters(b, f, { source = true } = {}) {
+    let x = source ? bySource(f.source || 'all')(b) : b;
+    if (f.status) x = x.eq('status', f.status);
+    const [from, to] = orderRange(f);
+    if (from) x = x.gte('placed_at', from.toISOString());
+    if (to) x = x.lt('placed_at', to.toISOString());
+    const term = (f.q || '').replace(/[,()%*]/g, ' ').trim();
+    if (term) x = x.or(['id', 'shopify_order_id', 'customer_name', 'customer_email', 'customer_phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
+    return x;
+  }
+  const orderSort = (b, sort) => (sort === 'old' ? b.order('placed_at', { ascending: true })
+    : sort === 'high' ? b.order('total_amount', { ascending: false }).order('placed_at', { ascending: false })
+      : sort === 'low' ? b.order('total_amount', { ascending: true }).order('placed_at', { ascending: false })
+        : b.order('placed_at', { ascending: false }));
+
+  /** Every row matching the filters, 1,000 at a time (for totals and export). */
+  async function allFilteredOrders(f, columns, cap = 20000) {
+    const out = [];
+    for (let from = 0; from < cap; from += 1000) {
+      const rows = await q(orderSort(orderFilters(sb.from('orders').select(columns), f), f.sort).range(from, from + 999));
+      out.push(...rows);
+      if (rows.length < 1000) break;
+    }
+    return out;
+  }
+
+  const filtersActive = (f) => !!(f.q || f.status || f.range !== 'all' || (f.source && f.source !== 'all'));
+
   RENDER.orders = async () => {
-    const term = state.orders.q.replace(/[,()%*]/g, ' ').trim();
-    const source = state.orders.source || 'all';
-    let query = bySource(source)(sb.from('orders').select('*', { count: 'exact' })).order('placed_at', { ascending: false });
-    if (term) query = query.or(['id', 'shopify_order_id', 'customer_name', 'customer_email', 'customer_phone'].map((c) => `${c}.ilike.%${term}%`).join(','));
-    const [{ rows, total }, st, nAll, nApp, nWeb] = await Promise.all([
-      pageOf(query, state.orders.page || 0),
+    const f = state.orders;
+    const size = PAGE_SIZES.includes(Number(f.size)) ? Number(f.size) : 100;
+    const query = orderSort(orderFilters(sb.from('orders').select('*', { count: 'exact' }), f), f.sort);
+    const counted = (src) => countOf('orders', (b) => bySource(src)(orderFilters(b, f, { source: false })));
+    const [{ rows, total }, st, nAll, nApp, nWeb, values] = await Promise.all([
+      pageOf(query, f.page || 0, size),
       orderSourceStats(),
-      countOf('orders'),
-      countOf('orders', bySource('app')),
-      countOf('orders', bySource('web')),
+      counted('all'),
+      counted('app'),
+      counted('web'),
+      allFilteredOrders(f, 'total_amount, status'),
     ]);
     orderRows = rows;
+    const live = values.filter((o) => o.status !== 'cancelled');
+    const value = live.reduce((s, o) => s + Number(o.total_amount || 0), 0);
+    const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`).join('');
     const metrics = `<div class="metrics">
       <div class="metric"><span class="metric-label">📱 App orders · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.app)}</span><span class="metric-sub">${esc(money(st.appRev))} · ${esc(st.appAll)} all time</span></div>
       <div class="metric"><span class="metric-label">🌐 Website orders · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.web)}</span><span class="metric-sub">${esc(money(st.webRev))} · ${esc(st.webAll)} all time</span></div>
       <div class="metric"><span class="metric-label">📊 App share · ${esc(st.monthName)}</span><span class="metric-value">${esc(st.share)}%</span><span class="metric-sub">of this month's orders (cancelled left out)</span></div>
     </div>`;
+    const filters = `<div class="order-filters">
+      <label class="of"><span>Date</span><select class="select" id="ofRange">${opts(ORDER_RANGES, f.range)}</select></label>
+      ${f.range === 'custom' ? `<label class="of"><span>From</span><input class="input" type="date" id="ofFrom" value="${esc(f.from)}"></label>
+        <label class="of"><span>To</span><input class="input" type="date" id="ofTo" value="${esc(f.to)}"></label>` : ''}
+      <label class="of"><span>Status</span><select class="select" id="ofStatus">${opts(ORDER_STATUSES, f.status)}</select></label>
+      <label class="of"><span>Sort</span><select class="select" id="ofSort">${opts(ORDER_SORTS, f.sort)}</select></label>
+      <label class="of"><span>Show</span><select class="select" id="ofSize">${opts(PAGE_SIZES.map((n) => [n, `${n} per page`]), size)}</select></label>
+      <span class="grow"></span>
+      ${filtersActive(f) ? '<button class="btn btn-ghost btn-sm" data-action="orders-clear">Clear filters</button>' : ''}
+      <button class="btn btn-outline btn-sm" data-action="orders-export" ${total ? '' : 'disabled'}>⬇ Export CSV</button>
+    </div>
+    <p class="cell-sub" style="margin:0 0 10px"><b>${esc(total.toLocaleString('en-IN'))}</b> order${total === 1 ? '' : 's'} match · value <b>${esc(money(value))}</b>${values.length - live.length ? ` (excluding ${esc(values.length - live.length)} cancelled)` : ''}</p>`;
     const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
       <th>Order</th><th>Source</th><th>Customer</th><th>Placed</th><th>Total</th><th>Status</th><th class="hide-sm">Account</th><th></th></tr></thead><tbody>
       ${rows.map((o) => `<tr>
@@ -2805,16 +2879,17 @@
         <td><div>${esc(o.customer_name || '—')}</div><div class="cell-sub">${esc(o.customer_email || o.customer_phone || '')}</div></td>
         <td class="nowrap">${esc(fmtDateTime(o.placed_at))}</td>
         <td>${esc(money(o.total_amount))}</td>
-        <td>${badge(titleCase(o.status || 'unknown'), 'blue')}</td>
+        <td>${badge(titleCase(o.status || 'unknown'), o.status === 'cancelled' ? 'red' : o.status === 'delivered' ? 'green' : 'blue')}</td>
         <td class="hide-sm">${o.user_id ? badge('Linked', 'teal') : '<span class="cell-sub">Guest</span>'}</td>
         <td class="actions"><button class="btn btn-outline btn-sm" data-action="open-order" data-id="${esc(o.id)}">View</button></td>
       </tr>`).join('')}</tbody></table></div>`
-      : emptyHtml('📦', term || source !== 'all' ? 'No matching orders' : 'No orders yet', term ? 'Try an order number, name, email or phone.' : source === 'app' ? 'No order has been placed in the app yet.' : 'Shopify orders appear here once the order webhook records them.');
+      : emptyHtml('📦', filtersActive(f) ? 'No matching orders' : 'No orders yet', filtersActive(f) ? 'Try other dates or filters, or Clear filters.' : 'Shopify orders appear here once the order webhook records them.');
     return `${metrics}<div class="toolbar">
-      ${tabsHtml('orders', 'source', [['all', 'All'], ['app', '📱 App'], ['web', '🌐 Website']], source, { all: nAll, app: nApp, web: nWeb })}
-      <input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(state.orders.q)}">
-      <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div><div class="card">${table}</div>
-      ${pagerHtml('orders', state.orders.page || 0, total)}`;
+      ${tabsHtml('orders', 'source', [['all', 'All'], ['app', '📱 App'], ['web', '🌐 Website']], f.source || 'all', { all: nAll, app: nApp, web: nWeb })}
+      <input class="input search" id="orderSearch" placeholder="Search order number, name, email or phone" value="${esc(f.q)}">
+      <span class="grow"></span><span class="cell-sub">To change an order, use Shopify admin.</span></div>
+      ${filters}<div class="card">${table}</div>
+      ${pagerHtml('orders', f.page || 0, total, size)}`;
   };
 
   AFTER.orders = () => {
@@ -2828,6 +2903,42 @@
         if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
       });
     }, 400));
+    const bind = (id, key) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('change', () => {
+        state.orders[key] = el.value;
+        state.orders.page = 0;
+        renderCurrent();
+      });
+    };
+    bind('ofRange', 'range');
+    bind('ofFrom', 'from');
+    bind('ofTo', 'to');
+    bind('ofStatus', 'status');
+    bind('ofSort', 'sort');
+    bind('ofSize', 'size');
+  };
+
+  ACTIONS['orders-clear'] = () => {
+    Object.assign(state.orders, { q: '', source: 'all', page: 0, range: 'all', from: '', to: '', status: '', sort: 'new' });
+    renderCurrent();
+  };
+
+  ACTIONS['orders-export'] = async (_id, btn) => {
+    await busy(btn, async () => {
+      const f = state.orders;
+      const rows = await allFilteredOrders(f, 'id, shopify_order_id, placed_at, status, customer_name, customer_email, customer_phone, shipping_address, subtotal, discount_amount, shipping_amount, total_amount, coupon_code, payment_method, checkout_intent_id, user_id');
+      const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const head = ['Order', 'Shopify id', 'Placed', 'Source', 'Status', 'Customer', 'Email', 'Phone', 'Ship to', 'Subtotal', 'Discount', 'Shipping', 'Total', 'Coupon', 'Payment', 'App account'];
+      const lines = rows.map((o) => [o.id, o.shopify_order_id, fmtDateTime(o.placed_at), fromApp(o) ? 'App' : 'Website', titleCase(o.status || ''),
+        o.customer_name, o.customer_email, o.customer_phone, o.shipping_address, o.subtotal, o.discount_amount, o.shipping_amount,
+        o.total_amount, o.coupon_code, o.payment_method, o.user_id ? 'Linked' : ''].map(cell).join(','));
+      const range = ORDER_RANGES.find(([v]) => v === f.range)?.[1] || '';
+      download(`doggyji-orders-${new Date().toISOString().slice(0, 10)}${f.range !== 'all' ? `-${range.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : ''}.csv`,
+        '﻿' + [head.map(cell).join(','), ...lines].join('\r\n'), 'text/csv;charset=utf-8');
+      toast(`${rows.length.toLocaleString('en-IN')} orders exported.`, 'success');
+    });
   };
 
   ACTIONS['open-order'] = async (id) => {

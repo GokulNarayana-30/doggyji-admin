@@ -461,3 +461,8 @@ html[data-env="staging"] body::before {
 
 /* Previous / Next under long lists. */
 .pager { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+
+/* Orders: date, status, sort and page-size filters. */
+.order-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; margin: 4px 0 10px; }
+.order-filters .of { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--text-2); }
+.order-filters .of .select, .order-filters .of .input { min-width: 136px; }
