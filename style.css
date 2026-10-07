@@ -444,3 +444,13 @@ html[data-env="staging"] body::before {
 .product-pick img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
 .product-pick > span { display: flex; flex-direction: column; min-width: 0; }
 .modal-foot .grow { flex: 1; }
+
+/* Live user suggestions under a "One person" field. */
+.suggest-host { position: relative; }
+.suggest { position: absolute; left: 0; right: 0; z-index: 30; margin-top: 4px; max-height: 300px; overflow: auto;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
+.suggest-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left;
+  padding: 8px 12px; border: 0; background: transparent; cursor: pointer; color: inherit; font: inherit; }
+.suggest-row:hover, .suggest-row.on { background: var(--teal-soft); }
+.suggest-empty { padding: 10px 12px; font-size: 13px; color: var(--text-3); }

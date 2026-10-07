@@ -2205,7 +2205,7 @@
         <div class="field"><label for="anAudience">Send to</label><select class="select" id="anAudience">${opt(AUDIENCES, d.audience)}</select></div>
         <div class="field" id="anValueField" ${d.audience === 'city' || d.audience === 'user' ? '' : 'hidden'}>
           <label for="anValue" id="anValueLabel">${d.audience === 'user' ? 'Username or user id' : 'City'}</label>
-          <input class="input" id="anValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? '@username' : 'e.g. Bengaluru'}"></div>
+          <input class="input" id="anValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? 'Type a name, @username, email or phone' : 'e.g. Bengaluru'}"></div>
       </div>
       <div class="field"><label for="anTitle">Title * <span class="cell-sub" id="anTitleCount"></span></label>
         <input class="input" id="anTitle" maxlength="65" value="${esc(d.title)}" placeholder="e.g. New: Ragi Shots Mini"></div>
@@ -2259,6 +2259,88 @@
     return null;
   }
 
+  /**
+   * Live suggestions under a "One person" field: typing part of a name,
+   * @username, email or phone lists matching app users; picking one fills in
+   * @username (or the user id when there is none), which the server reads.
+   * Only while `isPerson()` says the field is asking for a person.
+   */
+  function attachUserSuggest(inputId, isPerson) {
+    const input = document.getElementById(inputId);
+    if (!input || input.dataset.suggest) return;
+    input.dataset.suggest = '1';
+    input.setAttribute('autocomplete', 'off');
+    const box = document.createElement('div');
+    box.className = 'suggest';
+    box.hidden = true;
+    input.parentElement.classList.add('suggest-host');
+    input.insertAdjacentElement('afterend', box);
+    const picked = document.createElement('div');
+    picked.className = 'hint';
+    box.insertAdjacentElement('afterend', picked);
+    let rows = [];
+    let active = -1;
+    let seq = 0;
+    let choosing = false;
+
+    const close = () => { box.hidden = true; active = -1; };
+    const choose = (u) => {
+      input.value = u.username ? `@${u.username}` : u.id;
+      picked.textContent = `✓ ${u.full_name || 'No name'}${u.username ? ` (@${u.username})` : ''}${u.city ? ` · ${u.city}` : ''}`;
+      close();
+      choosing = true; // our own change: tell the form, don't search again
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      choosing = false;
+    };
+    const paint = () => {
+      box.innerHTML = rows.length
+        ? rows.map((u, i) => `<button type="button" class="suggest-row ${i === active ? 'on' : ''}" data-i="${i}">
+            <span class="cell-main">${esc(u.full_name || 'No name')}</span>
+            <span class="cell-sub">${esc(u.username ? `@${u.username}` : u.id)}${u.city ? ` · ${esc(u.city)}` : ''}${u.email ? ` · ${esc(u.email)}` : ''}</span></button>`).join('')
+        : '<div class="suggest-empty">No app user matches.</div>';
+      box.hidden = false;
+    };
+    const search = debounce(async () => {
+      const term = input.value.trim().replace(/^@/, '').replace(/[,()%*]/g, ' ').trim();
+      if (!isPerson() || term.length < 2) { close(); return; }
+      const mine = ++seq;
+      const { data } = await sb.from('profiles').select('id, username, full_name, city, email')
+        .or(['username', 'full_name', 'email', 'phone'].map((c) => `${c}.ilike.%${term}%`).join(','))
+        .order('username', { ascending: true }).limit(8);
+      if (mine !== seq || document.activeElement !== input) return;
+      rows = data || [];
+      active = -1;
+      paint();
+    }, 250);
+
+    input.addEventListener('input', () => {
+      if (choosing) return;
+      picked.textContent = '';
+      search();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (box.hidden || !rows.length) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        active = (active + (e.key === 'ArrowDown' ? 1 : rows.length - 1)) % rows.length;
+        paint();
+      } else if (e.key === 'Enter' && active >= 0) {
+        e.preventDefault();
+        choose(rows[active]);
+      } else if (e.key === 'Escape') {
+        close();
+      }
+    });
+    // mousedown, so the pick lands before the field loses focus.
+    box.addEventListener('mousedown', (e) => {
+      const b = e.target.closest('.suggest-row');
+      if (!b) return;
+      e.preventDefault();
+      choose(rows[Number(b.dataset.i)]);
+    });
+    input.addEventListener('blur', () => setTimeout(close, 150));
+  }
+
   AFTER.announce = () => {
     const counts = () => {
       $('#anTitleCount').textContent = `${$('#anTitle').value.length}/65`;
@@ -2274,12 +2356,13 @@
       const a = $('#anAudience').value;
       $('#anValueField').hidden = !(a === 'city' || a === 'user');
       $('#anValueLabel').textContent = a === 'user' ? 'Username or user id' : 'City';
-      $('#anValue').placeholder = a === 'user' ? '@username' : 'e.g. Bengaluru';
+      $('#anValue').placeholder = a === 'user' ? 'Type a name, @username, email or phone' : 'e.g. Bengaluru';
       $('#anValue').value = '';
       $('#anReach').textContent = 'Check the reach before sending.';
       readAnnouncement();
     });
     counts();
+    attachUserSuggest('anValue', () => $('#anAudience').value === 'user');
   };
 
   async function announcementReach(d) {
@@ -2467,7 +2550,7 @@
         <div class="field"><label for="prAudience">Send to</label><select class="select" id="prAudience">${opt(PROMO_AUDIENCES, d.audience)}</select></div>
         <div class="field" id="prValueField" ${d.audience === 'all' ? 'hidden' : ''}>
           <label for="prValue" id="prValueLabel">${d.audience === 'user' ? 'Username or user id' : 'City'}</label>
-          <input class="input" id="prValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? '@username' : 'e.g. Bengaluru'}"></div>
+          <input class="input" id="prValue" maxlength="80" value="${esc(d.audience_value)}" placeholder="${d.audience === 'user' ? 'Type a name, @username, email or phone' : 'e.g. Bengaluru'}"></div>
       </div>
       <div class="field"><label for="prTitle">Title * <span class="cell-sub" id="prTitleCount"></span></label>
         <input class="input" id="prTitle" maxlength="65" value="${esc(d.title)}" placeholder="e.g. Ragi Shots are back in stock"></div>
@@ -2528,6 +2611,7 @@
 
   AFTER.promote = () => {
     ['prTitle', 'prBody', 'prValue', 'prImage'].forEach((f) => document.getElementById(f).addEventListener('input', repaintPromotion));
+    attachUserSuggest('prValue', () => $('#prAudience').value === 'user');
     $('#prSearch').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); ACTIONS['promo-search'](null, null); }
     });
@@ -2535,7 +2619,7 @@
       const a = $('#prAudience').value;
       $('#prValueField').hidden = a === 'all';
       $('#prValueLabel').textContent = a === 'user' ? 'Username or user id' : 'City';
-      $('#prValue').placeholder = a === 'user' ? '@username' : 'e.g. Bengaluru';
+      $('#prValue').placeholder = a === 'user' ? 'Type a name, @username, email or phone' : 'e.g. Bengaluru';
       $('#prValue').value = '';
       $('#prReach').textContent = 'Check the reach before sending.';
       readPromotion();
