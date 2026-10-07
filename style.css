@@ -445,12 +445,16 @@ html[data-env="staging"] body::before {
 .product-pick > span { display: flex; flex-direction: column; min-width: 0; }
 .modal-foot .grow { flex: 1; }
 
-/* Live user suggestions under a "One person" field. */
-.suggest-host { position: relative; }
-.suggest { position: absolute; left: 0; right: 0; z-index: 30; margin-top: 4px; max-height: 300px; overflow: auto;
+/* Live user suggestions under a "One person" field: the list opens below the input. */
+.suggest-wrap { position: relative; }
+.suggest { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; max-height: 264px; overflow-y: auto;
   background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
-.suggest-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left;
-  padding: 8px 12px; border: 0; background: transparent; cursor: pointer; color: inherit; font: inherit; }
+.suggest-row { display: block; width: 100%; text-align: left; padding: 7px 12px; border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; cursor: pointer; color: inherit; font: inherit; }
+.suggest-row:last-child { border-bottom: 0; }
 .suggest-row:hover, .suggest-row.on { background: var(--teal-soft); }
+.suggest-line { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; line-height: 1.4; }
+.suggest-line.cell-sub { font-size: 12px; }
+.suggest-handle { color: var(--teal); font-weight: 600; }
 .suggest-empty { padding: 10px 12px; font-size: 13px; color: var(--text-3); }

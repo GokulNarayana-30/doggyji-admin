@@ -2270,14 +2270,20 @@
     if (!input || input.dataset.suggest) return;
     input.dataset.suggest = '1';
     input.setAttribute('autocomplete', 'off');
+    // The input and its list get their own wrapper, so the list opens just
+    // below the input. Placed in the field itself (a flex column), it sat at
+    // the top of the field and covered the input.
+    const wrap = document.createElement('div');
+    wrap.className = 'suggest-wrap';
+    input.insertAdjacentElement('beforebegin', wrap);
+    wrap.appendChild(input);
     const box = document.createElement('div');
     box.className = 'suggest';
     box.hidden = true;
-    input.parentElement.classList.add('suggest-host');
-    input.insertAdjacentElement('afterend', box);
+    wrap.appendChild(box);
     const picked = document.createElement('div');
     picked.className = 'hint';
-    box.insertAdjacentElement('afterend', picked);
+    wrap.insertAdjacentElement('afterend', picked);
     let rows = [];
     let active = -1;
     let seq = 0;
@@ -2295,8 +2301,8 @@
     const paint = () => {
       box.innerHTML = rows.length
         ? rows.map((u, i) => `<button type="button" class="suggest-row ${i === active ? 'on' : ''}" data-i="${i}">
-            <span class="cell-main">${esc(u.full_name || 'No name')}</span>
-            <span class="cell-sub">${esc(u.username ? `@${u.username}` : u.id)}${u.city ? ` · ${esc(u.city)}` : ''}${u.email ? ` · ${esc(u.email)}` : ''}</span></button>`).join('')
+            <span class="suggest-line"><b>${esc(u.full_name || 'No name')}</b> <span class="suggest-handle">${esc(u.username ? `@${u.username}` : u.id)}</span></span>
+            <span class="suggest-line cell-sub">${esc([u.city, u.email].filter(Boolean).join(' · ') || '—')}</span></button>`).join('')
         : '<div class="suggest-empty">No app user matches.</div>';
       box.hidden = false;
     };
