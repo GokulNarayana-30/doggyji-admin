@@ -466,3 +466,6 @@ html[data-env="staging"] body::before {
 .order-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; margin: 4px 0 10px; }
 .order-filters .of { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--text-2); }
 .order-filters .of .select, .order-filters .of .input { min-width: 136px; }
+/* One height for every control in the row, so the buttons line up with the dropdowns. */
+.order-filters .select, .order-filters .input, .order-filters .btn { height: 40px; box-sizing: border-box; }
+.order-filters .btn { padding: 0 14px; font-size: 13px; }
