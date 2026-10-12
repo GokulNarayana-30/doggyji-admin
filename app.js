@@ -458,6 +458,7 @@
     await sb.auth.signOut().catch(() => {});
     me.staff = null;
     me.perms = new Set();
+    closeModal();
     history.replaceState(null, '', location.pathname);
     showAuth('signin');
   }
@@ -486,6 +487,7 @@
   function closeModal() {
     $('#modalRoot').innerHTML = '';
     modalHandlers = {};
+    stopSupportPoll();
   }
 
   $('#modalRoot').addEventListener('mousedown', (e) => {
@@ -549,8 +551,8 @@
     blood: { tab: 'requests', status: 'active' },
     lost: { status: 'open' },
     orders: { q: '', source: 'all', page: 0, size: 100, range: 'all', from: '', to: '', status: '', sort: 'new' },
-    support: { status: 'open' },
-    audit: { result: 'all', q: '' },
+    support: { status: 'open', q: '', sort: 'new', page: 0 },
+    audit: { result: 'all', q: '', from: '', to: '', page: 0 },
   };
 
   const VIEWS = [
@@ -603,6 +605,8 @@
       title: 'Orders', subtitle: 'Shop orders synced from Shopify (read-only here)' },
     { id: 'staff', label: 'Staff & roles', icon: '👥', section: 'Administration', perms: ['employees.view', 'employees.manage'],
       title: 'Staff & roles', subtitle: 'Who can use this portal, and what each role may do' },
+    { id: 'appupdates', label: 'App updates', icon: '⬆️', section: 'Administration', perms: ['app_updates.manage'],
+      title: 'App updates', subtitle: 'Which app versions are asked to update, and which must' },
     { id: 'audit', label: 'Audit log', icon: '📜', section: 'Administration', perms: ['audit.view'],
       title: 'Audit log', subtitle: 'Every staff action, recorded server-side and append-only' },
   ];
@@ -749,6 +753,15 @@
       jobs.newUsers = countOf('profiles', (b) => b.gte('created_at', week));
     }
     if (can('orders.view', 'orders.manage')) jobs.orders = countOf('orders', (b) => b.gte('placed_at', week));
+    if (can('support.manage')) {
+      jobs.support = countOf('support_threads', (b) => b.eq('status', 'open'));
+      // How long the longest-waiting customer has waited: '' none, null unknown.
+      jobs.supportOldest = (async () => {
+        const { data, error } = await sb.from('support_threads').select('last_message_at')
+          .eq('status', 'open').order('last_message_at', { ascending: true }).limit(1);
+        return error ? null : (data?.[0]?.last_message_at ?? '');
+      })();
+    }
 
     const keys = Object.keys(jobs);
     const values = await Promise.all(Object.values(jobs));
@@ -767,6 +780,7 @@
       metric('reports', 'Open reports', '🚩', 'reports', 'Not reviewed yet', 'warn'),
       metric('providers', 'Pending providers', '🛡️', 'providers', 'Awaiting verification', 'warn'),
       show('clinics') ? `<a class="metric ${listings > 0 ? 'warn' : ''}" href="#/directory"><span class="metric-label">🏥 Pending listings</span><span class="metric-value">${esc(listings)}</span><span class="metric-sub">Clinics and blood banks</span></a>` : '',
+      metric('support', 'Awaiting our reply', '💬', 'support', n.supportOldest ? `Longest wait: ${ago(n.supportOldest).replace(' ago', '')}` : 'Customers writing to Doggy Ji', 'alert'),
       metric('bookings', 'Pending bookings', '📅', 'bookings', 'Not confirmed yet', ''),
       metric('users', 'Users', '👤', 'users', show('newUsers') ? `+${num('newUsers')} in the last 7 days` : '', ''),
       metric('orders', 'Orders (7 days)', '📦', 'orders', 'From Shopify', ''),
@@ -777,13 +791,21 @@
       ['calls', '📞', 'Donor call requests to handle', 'blood'],
       ['reports', '🚩', 'User reports to review', 'reports'],
       ['providers', '🛡️', 'Provider applications to verify', 'providers'],
+      ['support', '💬', 'Customers waiting for a support reply', 'support'],
     ].filter(([k]) => n[k] > 0);
     if (listings > 0) attention.push(['listings', '🏥', 'Clinic / blood bank listings to review', 'directory']);
 
-    const attentionHtml = attention.length
+    // A count that could not be read is not zero: say so instead of an all-clear.
+    const CHECKED = { sos: 'blood SOS', calls: 'call requests', reports: 'reports', providers: 'providers', clinics: 'clinic listings', banks: 'blood bank listings', support: 'support' };
+    const unchecked = Object.keys(CHECKED).filter((k) => k in n && n[k] == null).map((k) => CHECKED[k]);
+    const uncheckedHtml = unchecked.length
+      ? `<p class="note" style="margin:0 16px 14px">⚠️ Could not check: ${esc(unchecked.join(', '))}. This list may be incomplete. Press Refresh to try again.</p>`
+      : '';
+
+    const attentionHtml = (attention.length
       ? `<ul class="attention">${attention.map(([k, icon, label, href]) =>
         `<li><a href="#/${href}"><span>${icon}</span><span>${esc(label)}</span><span class="n">${esc(k === 'listings' ? listings : n[k])}</span></a></li>`).join('')}</ul>`
-      : '<div class="all-clear">✅ Nothing is waiting on the team right now.</div>';
+      : (unchecked.length ? '' : '<div class="all-clear">✅ Nothing is waiting on the team right now.</div>')) + uncheckedHtml;
 
     let recent = '';
     if (can('audit.view')) {
@@ -2449,12 +2471,33 @@
   const TOPIC_LABEL = { order: 'Order', subscription: 'Subscription', booking: 'Booking', account: 'Account', other: 'Other' };
 
   RENDER.support = async () => {
-    const status = state.support.status;
-    let query = sb.from('support_threads').select('*').order('last_message_at', { ascending: false }).limit(200);
+    const { status, q: search, sort } = state.support;
+    const page = state.support.page || 0;
+    let query = sb.from('support_threads').select('*', { count: 'exact' });
     if (status !== 'all') query = query.eq('status', status);
-    const [rows, open] = await Promise.all([q(query), countOf('support_threads', (b) => b.eq('status', 'open'))]);
+    // The customer is found among every profile, not among the rows on screen.
+    const term = search.replace(/[,()%*]/g, ' ').trim();
+    if (term) {
+      const hits = await q(sb.from('profiles').select('id')
+        .or(['full_name', 'username', 'email', 'phone'].map((c) => `${c}.ilike.%${term}%`).join(',')).limit(500));
+      query = query.in('user_id', hits.length ? hits.map((h) => h.id) : ['-']);
+    }
+    const oldestFirst = sort === 'old';
+    query = query.order('last_message_at', { ascending: oldestFirst }).order('id', { ascending: oldestFirst });
+    const [{ rows, total }, open] = await Promise.all([
+      pageOf(query, page),
+      countOf('support_threads', (b) => b.eq('status', 'open')),
+    ]);
     const people = await profilesFor(rows.map((r) => r.user_id));
-    const tabs = tabsHtml('support', 'status', SUPPORT_TABS, status, { open });
+    const toolbar = `<div class="toolbar">
+      ${tabsHtml('support', 'status', SUPPORT_TABS, status, { open })}
+      <span class="grow"></span>
+      <input class="input search" id="supSearch" placeholder="Search name, @username, email or phone" value="${esc(search)}">
+      <select class="select" id="supSort" aria-label="Sort conversations">
+        <option value="new" ${oldestFirst ? '' : 'selected'}>Newest activity first</option>
+        <option value="old" ${oldestFirst ? 'selected' : ''}>Longest waiting first</option>
+      </select>
+    </div>`;
     const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
       <th>Customer</th><th>Last message</th><th>When</th><th>Status</th><th></th></tr></thead><tbody>
       ${rows.map((t) => `<tr>
@@ -2464,37 +2507,135 @@
         <td>${badge({ open: 'Waiting for us', replied: 'Replied', closed: 'Closed' }[t.status] || t.status, { open: 'red', replied: 'blue', closed: 'slate' }[t.status] || 'slate')}</td>
         <td class="nowrap"><button class="btn btn-outline btn-sm" data-action="open-thread" data-id="${esc(t.id)}">Open</button></td>
       </tr>`).join('')}</tbody></table></div>`
-      : emptyHtml('💬', 'Nothing here', status === 'open' ? 'No customer is waiting for a reply.' : 'No conversations in this list.');
-    return `${tabs}<div class="card">${table}</div>
+      : emptyHtml('💬', 'Nothing here', term ? 'No conversation matches that customer.' : (status === 'open' ? 'No customer is waiting for a reply.' : 'No conversations in this list.'));
+    return `${toolbar}<div class="card">${table}</div>${pagerHtml('support', page, total)}
       <p class="note">Customers write from Help &amp; Support or the pinned “Doggy Ji” chat in the app’s Messages. Your reply appears in their chat as “Doggy Ji” (your name shows only here) and they get a push notification.</p>`;
   };
 
+  AFTER.support = () => {
+    const input = document.getElementById('supSearch');
+    if (input) {
+      input.addEventListener('input', debounce(() => {
+        state.support.q = input.value;
+        state.support.page = 0;
+        renderCurrent().then(() => {
+          const again = document.getElementById('supSearch');
+          if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+        });
+      }, 400));
+    }
+    document.getElementById('supSort')?.addEventListener('change', (e) => {
+      state.support.sort = e.target.value;
+      state.support.page = 0;
+      renderCurrent();
+    });
+  };
+
+  // A conversation opens on its newest SUPPORT_PAGE messages; older ones load on
+  // request. Messages are ordered by (created_at, id) so two sent in the same
+  // instant are neither skipped nor shown twice at a page edge.
+  const SUPPORT_PAGE = 50;
+  const SUPPORT_POLL_MS = 8000;
+  let supportPoll = null;
+
+  function stopSupportPoll() {
+    if (supportPoll) clearInterval(supportPoll.timer);
+    supportPoll = null;
+  }
+
+  /** One page of messages, oldest first. `before` is the oldest one already shown. */
+  async function fetchSupportMessages(threadId, before = null) {
+    let query = sb.from('support_messages').select('*').eq('thread_id', threadId)
+      .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(SUPPORT_PAGE + 1);
+    if (before) {
+      query = query.or(`created_at.lt.${before.created_at},and(created_at.eq.${before.created_at},id.lt.${before.id})`);
+    }
+    const rows = await q(query);
+    return { rows: rows.slice(0, SUPPORT_PAGE).reverse(), more: rows.length > SUPPORT_PAGE };
+  }
+
+  function supportLogInner(thread) {
+    const older = thread.more
+      ? '<button class="btn btn-ghost btn-sm" style="align-self:center" data-action="m" data-id="older">Load older messages</button>'
+      : '';
+    return older + supportMessagesHtml(thread.msgs, thread.name);
+  }
+
   function supportMessagesHtml(msgs, customerName) {
     if (!msgs.length) return emptyHtml('💬', 'No messages', 'This conversation is empty.');
-    return `<div class="support-log">${msgs.map((m) => {
+    return msgs.map((m) => {
       const staff = m.sender === 'staff';
       const who = staff ? `${m.staff_name || 'Staff'} (Doggy Ji)` : customerName;
       return `<div class="support-msg ${staff ? 'staff' : 'customer'}">
         <div class="support-meta">${esc(who)} · ${esc(fmtDateTime(m.created_at))}${m.topic ? ` · ${badge(TOPIC_LABEL[m.topic] || m.topic, 'blue')}` : ''}${m.promotion_id ? ` · ${badge('About an offer', 'amber')}` : ''}</div>
         <div class="support-body">${esc(m.body)}</div>
       </div>`;
-    }).join('')}</div>`;
+    }).join('');
+  }
+
+  function setSupportStatus(text) {
+    const el = document.getElementById('supStatus');
+    if (el) { el.textContent = text; el.hidden = !text; }
+  }
+
+  /** Checks the open conversation for new messages until it is closed. */
+  function startSupportPoll(thread) {
+    stopSupportPoll();
+    const poll = { id: thread.id, timer: null };
+    supportPoll = poll;
+    poll.timer = setInterval(async () => {
+      const log = document.getElementById('supLog');
+      // Closed, signed out, or another conversation opened: stop.
+      if (supportPoll !== poll || !log || log.dataset.thread !== thread.id || !me.staff) {
+        if (supportPoll === poll) stopSupportPoll();
+        return;
+      }
+      if (document.hidden) return;
+      try {
+        const newest = thread.msgs[thread.msgs.length - 1];
+        let query = sb.from('support_messages').select('*').eq('thread_id', thread.id)
+          .order('created_at', { ascending: true }).order('id', { ascending: true }).limit(100);
+        if (newest) query = query.gte('created_at', newest.created_at);
+        const rows = await q(query);
+        if (supportPoll !== poll || document.getElementById('supLog') !== log) return;
+        setSupportStatus('');
+        const known = new Set(thread.msgs.map((m) => m.id));
+        const fresh = rows.filter((m) => !known.has(m.id));
+        if (!fresh.length) return;
+        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+        thread.msgs.push(...fresh);
+        const top = log.scrollTop;
+        log.innerHTML = supportLogInner(thread);
+        if (atBottom) {
+          log.scrollTop = log.scrollHeight;
+        } else {
+          log.scrollTop = top;
+          const pill = document.getElementById('supNew');
+          if (pill) { pill.hidden = false; pill.textContent = `${fresh.length} new message${fresh.length > 1 ? 's' : ''} ↓`; }
+        }
+      } catch (_) {
+        if (supportPoll === poll) setSupportStatus('Connection problem: new messages may not be showing. Retrying…');
+      }
+    }, SUPPORT_POLL_MS);
   }
 
   async function openThread(id) {
-    const [{ data: t }, msgs] = await Promise.all([
+    const [{ data: t }, first] = await Promise.all([
       sb.from('support_threads').select('*').eq('id', id).maybeSingle(),
-      q(sb.from('support_messages').select('*').eq('thread_id', id).order('created_at', { ascending: true }).limit(500)),
+      fetchSupportMessages(id),
     ]);
     if (!t) { toast('This conversation no longer exists.', 'warning'); return; }
     const p = (await profilesFor([t.user_id]))[t.user_id];
     const name = p?.full_name || (p?.username ? `@${p.username}` : `User ${shortId(t.user_id)}`);
     const closed = t.status === 'closed';
+    const thread = { id, name, msgs: first.rows, more: first.more };
     openModal({
       title: name,
       subtitle: [p?.username ? `@${p.username}` : null, p?.email, p?.phone, p?.city].filter(Boolean).join(' · '),
       wide: true,
-      body: `${supportMessagesHtml(msgs, name)}
+      body: `<div class="support-log" id="supLog" data-thread="${esc(id)}">${supportLogInner(thread)}</div>
+        <button class="btn btn-outline btn-sm" id="supNew" data-action="m" data-id="newer" hidden style="margin-top:8px"></button>
+        <p class="note" id="supStatus" hidden style="color:var(--red)"></p>
         <div class="field" style="margin-top:14px"><label for="supReply">Reply as Doggy Ji</label>
         <textarea class="textarea" id="supReply" maxlength="2000" placeholder="Write your reply…"></textarea></div>`,
       foot: `<button class="btn btn-ghost" data-action="open-user" data-id="${esc(t.user_id)}">View user</button>
@@ -2502,6 +2643,24 @@
         <button class="btn btn-outline" data-action="m" data-id="status">${closed ? 'Reopen' : 'Close conversation'}</button>
         <button class="btn btn-primary" data-action="m" data-id="reply">Send reply</button>`,
       handlers: {
+        older: async (btn) => {
+          const log = document.getElementById('supLog');
+          await busy(btn, async () => {
+            const page = await fetchSupportMessages(id, thread.msgs[0]);
+            const known = new Set(thread.msgs.map((m) => m.id));
+            thread.msgs = [...page.rows.filter((m) => !known.has(m.id)), ...thread.msgs];
+            thread.more = page.more;
+            const before = log.scrollHeight - log.scrollTop;
+            log.innerHTML = supportLogInner(thread);
+            // Stay on the message that was being read.
+            log.scrollTop = log.scrollHeight - before;
+          });
+        },
+        newer: () => {
+          const log = document.getElementById('supLog');
+          log.scrollTop = log.scrollHeight;
+          document.getElementById('supNew').hidden = true;
+        },
         reply: async (btn) => {
           const body = $('#supReply').value.trim();
           if (!body) { toast('Write a reply first.', 'warning'); return; }
@@ -2525,7 +2684,16 @@
       },
     });
     const log = $('#modalRoot .support-log');
-    if (log) log.scrollTop = log.scrollHeight;
+    if (log) {
+      log.scrollTop = log.scrollHeight;
+      log.addEventListener('scroll', () => {
+        if (log.scrollHeight - log.scrollTop - log.clientHeight < 60) {
+          const pill = document.getElementById('supNew');
+          if (pill) pill.hidden = true;
+        }
+      });
+    }
+    startSupportPoll(thread);
   }
 
   ACTIONS['open-thread'] = (id) => openThread(id).catch((e) => toast(readError(e), 'error'));
@@ -3139,19 +3307,40 @@
   const auditActor = (a) => a.actor?.name || a.actor?.email || a.actor?.employee_id || 'System';
   const auditTarget = (a) => [a.target?.type, a.target?.id ? shortId(a.target.id) : null].filter(Boolean).join(' · ') || '—';
 
-  RENDER.audit = async () => {
-    const rows = await q(sb.from('admin_audit_logs').select('*').order('created_at', { ascending: false }).limit(500));
-    auditRows = rows;
-    const { result, q: term } = state.audit;
-    const t = term.trim().toLowerCase();
-    const list = rows.filter((a) => (result === 'all' || a.result === result) &&
-      (!t || `${a.event_name} ${auditActor(a)} ${a.target?.id || ''} ${a.target?.type || ''}`.toLowerCase().includes(t)));
-    const counts = { all: rows.length };
-    rows.forEach((a) => { counts[a.result] = (counts[a.result] || 0) + 1; });
+  /** The audit rows matching the filters on screen; `result` overrides the result filter. */
+  function auditQuery(select, options, result = state.audit.result) {
+    const { q: search, from, to } = state.audit;
+    let query = sb.from('admin_audit_logs').select(select, options);
+    if (result !== 'all') query = query.eq('result', result);
+    if (from) query = query.gte('created_at', new Date(`${from}T00:00:00`).toISOString());
+    if (to) {
+      const end = new Date(`${to}T00:00:00`);
+      end.setDate(end.getDate() + 1);
+      query = query.lt('created_at', end.toISOString());
+    }
+    const term = search.replace(/[,()%*\\]/g, ' ').trim();
+    if (term) {
+      query = query.or(['event_name', 'actor->>name', 'actor->>email', 'actor->>employee_id', 'target->>id', 'target->>type']
+        .map((c) => `${c}.ilike.%${term}%`).join(','));
+    }
+    // (created_at, id): a stable order, so pages and exports never skip or repeat a row.
+    return query.order('created_at', { ascending: false }).order('id', { ascending: false });
+  }
 
-    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+  RENDER.audit = async () => {
+    const { result, q: term, from, to } = state.audit;
+    const page = state.audit.page || 0;
+    const head = { count: 'exact', head: true };
+    const [{ rows, total }, ...tabCounts] = await Promise.all([
+      pageOf(auditQuery('*', { count: 'exact' }), page),
+      ...['all', 'SUCCESS', 'DENIED', 'FAILURE'].map((r) => auditQuery('id', head, r).then((x) => (x.error ? null : x.count))),
+    ]);
+    auditRows = rows;
+    const counts = { all: tabCounts[0], SUCCESS: tabCounts[1], DENIED: tabCounts[2], FAILURE: tabCounts[3] };
+
+    const table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
       <th>When</th><th>Staff</th><th>Event</th><th class="hide-sm">Target</th><th>Result</th><th></th></tr></thead><tbody>
-      ${list.map((a) => `<tr>
+      ${rows.map((a) => `<tr>
         <td class="nowrap">${esc(fmtDateTime(a.created_at))}</td>
         <td><div class="cell-main">${esc(auditActor(a))}</div><div class="cell-sub">${esc(a.actor?.role ? titleCase(a.actor.role) : '')}</div></td>
         <td class="mono">${esc(a.event_name)}</td>
@@ -3164,9 +3353,12 @@
     return `<div class="toolbar">
         ${tabsHtml('audit', 'result', [['all', 'All'], ['SUCCESS', 'Success'], ['DENIED', 'Denied'], ['FAILURE', 'Failed']], result, counts)}
         <span class="grow"></span>
+        <label class="cell-sub" for="auditFrom">From</label><input class="input" type="date" id="auditFrom" value="${esc(from)}">
+        <label class="cell-sub" for="auditTo">To</label><input class="input" type="date" id="auditTo" value="${esc(to)}">
         <input class="input search" id="auditSearch" placeholder="Search event, staff or target" value="${esc(term)}">
         ${can('audit.export') ? '<button class="btn btn-outline" data-action="export-audit">Export JSON</button>' : ''}
-      </div><div class="card">${table}</div><p class="note">Showing the latest 500 entries. Entries cannot be edited or deleted.</p>`;
+      </div><div class="card">${table}</div>${pagerHtml('audit', page, total)}
+      <p class="note">Every entry is searchable. The tabs, search and dates apply to all entries, and Export downloads everything that matches them, not only this page. Entries cannot be edited or deleted.</p>`;
   };
 
   AFTER.audit = () => {
@@ -3174,11 +3366,19 @@
     if (!input) return;
     input.addEventListener('input', debounce(() => {
       state.audit.q = input.value;
+      state.audit.page = 0;
       renderCurrent().then(() => {
         const again = document.getElementById('auditSearch');
         if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
       });
     }, 300));
+    for (const [id, key] of [['auditFrom', 'from'], ['auditTo', 'to']]) {
+      document.getElementById(id)?.addEventListener('change', (e) => {
+        state.audit[key] = e.target.value;
+        state.audit.page = 0;
+        renderCurrent();
+      });
+    }
   };
 
   ACTIONS['open-audit'] = (id) => {
@@ -3197,9 +3397,150 @@
     });
   };
 
-  ACTIONS['export-audit'] = () => {
-    download(`doggyji-audit-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(auditRows, null, 2));
-    toast(`Exported ${auditRows.length} entries.`, 'success');
+  // Export reads the matching entries a thousand at a time, up to this many.
+  const AUDIT_EXPORT_BATCH = 1000;
+  const AUDIT_EXPORT_MAX = 50000;
+
+  ACTIONS['export-audit'] = async (_id, btn) => {
+    if (!can('audit.export')) return;
+    await busy(btn, async () => {
+      const out = [];
+      let total = 0;
+      while (out.length < AUDIT_EXPORT_MAX) {
+        const { rows, total: count } = await pageOf(
+          auditQuery('*', { count: 'exact' }), Math.floor(out.length / AUDIT_EXPORT_BATCH), AUDIT_EXPORT_BATCH);
+        total = count;
+        out.push(...rows);
+        if (rows.length < AUDIT_EXPORT_BATCH || out.length >= total) break;
+      }
+      const { from, to, result } = state.audit;
+      const tag = [result !== 'all' ? result.toLowerCase() : '', from, to ? `to-${to}` : ''].filter(Boolean).join('-');
+      download(`doggyji-audit-${new Date().toISOString().slice(0, 10)}${tag ? `-${tag}` : ''}.json`, JSON.stringify(out, null, 2));
+      if (out.length < total) {
+        toast(`Exported the newest ${out.length.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} matching entries. Narrow the dates to export the rest.`, 'warning');
+      } else {
+        toast(`Exported ${out.length.toLocaleString('en-IN')} entries.`, 'success');
+      }
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // App updates (app_config): the latest and the minimum build the app is told about
+  // ════════════════════════════════════════════════════════════════════════════
+  let appConfigRows = [];
+  let appConfigUndo = {};
+  const PLATFORM_LABEL = { android: 'Android (Google Play)', ios: 'iPhone (App Store)' };
+
+  /** What an install of each age will see, for the given settings. */
+  function updatePreview(latest, min) {
+    if (!Number.isInteger(latest) || !Number.isInteger(min) || latest < 0 || min < 0) {
+      return 'Enter whole numbers, 0 or more.';
+    }
+    if (min > latest) return 'The minimum build cannot be above the latest build.';
+    const lines = [];
+    if (min > 0) lines.push(`Build ${min - 1} or older: a “Please update” screen that cannot be dismissed. Nothing else in the app works until they update.`);
+    if (latest > min) lines.push(`Builds ${min}–${latest - 1}: a prompt to update, shown at most once a day, that can be dismissed.`);
+    lines.push(latest > 0 ? `Build ${latest} or newer: nothing.` : 'Nobody is asked to update.');
+    return lines.join(' ');
+  }
+
+  RENDER.appupdates = async () => {
+    appConfigRows = await q(sb.from('app_config').select('*').order('platform'));
+    appConfigUndo = {};
+    if (can('audit.view')) {
+      // The last change for each platform, so a mistake can be put back.
+      const { data } = await sb.from('admin_audit_logs').select('created_at, actor, target, change')
+        .eq('event_name', 'app_config.save').eq('result', 'SUCCESS')
+        .order('created_at', { ascending: false }).limit(40);
+      (data || []).forEach((a) => {
+        const platform = a.target?.id;
+        if (platform && !appConfigUndo[platform] && a.change?.before) appConfigUndo[platform] = a;
+      });
+    }
+    const cards = appConfigRows.map((c) => {
+      const id = c.platform;
+      const undo = appConfigUndo[id];
+      return `<div class="card" style="margin-bottom:16px"><div class="card-head"><div><h3>${esc(PLATFORM_LABEL[id] || id)}</h3>
+          <p>Last changed ${esc(ago(c.updated_at))}</p></div></div>
+        <div style="padding:0 16px 16px">
+          <div class="grid-2">
+            <div class="field"><label for="ac-${esc(id)}-latest">Latest build</label>
+              <input class="input" type="number" min="0" step="1" id="ac-${esc(id)}-latest" value="${esc(c.latest_build)}" data-ac="${esc(id)}"></div>
+            <div class="field"><label for="ac-${esc(id)}-min">Minimum supported build</label>
+              <input class="input" type="number" min="0" step="1" id="ac-${esc(id)}-min" value="${esc(c.min_build)}" data-ac="${esc(id)}"></div>
+          </div>
+          <div class="field"><label for="ac-${esc(id)}-msg">Message (optional, up to 300 characters)</label>
+            <textarea class="textarea" maxlength="300" id="ac-${esc(id)}-msg">${esc(c.update_message || '')}</textarea></div>
+          <div class="field"><label for="ac-${esc(id)}-url">Store link (https://)</label>
+            <input class="input" id="ac-${esc(id)}-url" value="${esc(c.store_url || '')}"></div>
+          <p class="note" id="ac-${esc(id)}-preview" style="margin:0 0 12px"></p>
+          <div class="toolbar" style="margin:0">
+            <button class="btn btn-primary" data-action="save-appconfig" data-id="${esc(id)}">Save</button>
+            ${undo ? `<button class="btn btn-outline" data-action="restore-appconfig" data-id="${esc(id)}">Restore the values before the last change (${esc(fmtDateTime(undo.created_at))})</button>` : ''}
+          </div></div></div>`;
+    }).join('');
+    return `${cards || emptyHtml('⬆️', 'No settings found', 'The app_config table has no rows.')}
+      <p class="note">Raise the minimum only for a serious bug, and only once the newer build is available to everyone on the store: the older installs are blocked until they update. Latest build only prompts. “Restore” fills the form with the earlier values; you still press Save, so it is recorded like any other change.</p>`;
+  };
+
+  const readAppConfig = (id) => ({
+    latest: Number($(`#ac-${id}-latest`).value),
+    min: Number($(`#ac-${id}-min`).value),
+    message: $(`#ac-${id}-msg`).value,
+    url: $(`#ac-${id}-url`).value,
+  });
+
+  AFTER.appupdates = () => {
+    const paint = (id) => {
+      const el = document.getElementById(`ac-${id}-preview`);
+      if (!el) return;
+      const v = readAppConfig(id);
+      el.textContent = `What people will see: ${updatePreview(v.latest, v.min)}`;
+    };
+    appConfigRows.forEach((c) => paint(c.platform));
+    document.querySelectorAll('[data-ac]').forEach((input) => {
+      input.addEventListener('input', () => paint(input.dataset.ac));
+    });
+  };
+
+  ACTIONS['restore-appconfig'] = (id) => {
+    const before = appConfigUndo[id]?.change?.before;
+    if (!before) return;
+    $(`#ac-${id}-latest`).value = before.latest_build;
+    $(`#ac-${id}-min`).value = before.min_build;
+    $(`#ac-${id}-msg`).value = before.update_message || '';
+    $(`#ac-${id}-url`).value = before.store_url || '';
+    $(`#ac-${id}-latest`).dispatchEvent(new Event('input'));
+    toast('Earlier values filled in. Press Save to apply them.', 'info');
+  };
+
+  ACTIONS['save-appconfig'] = async (id, btn) => {
+    const current = appConfigRows.find((c) => c.platform === id);
+    if (!current) return;
+    const v = readAppConfig(id);
+    if (!Number.isInteger(v.latest) || !Number.isInteger(v.min) || v.latest < 0 || v.min < 0) {
+      toast('Builds must be whole numbers, 0 or more.', 'warning');
+      return;
+    }
+    if (v.min > v.latest) { toast('The minimum build cannot be above the latest build.', 'warning'); return; }
+    const payload = { latest_build: v.latest, min_build: v.min, update_message: v.message, store_url: v.url };
+    if (v.min > current.min_build) {
+      const reason = await confirmBox({
+        title: `Block builds below ${v.min}?`,
+        message: `${updatePreview(v.latest, v.min)} Only continue if build ${v.min} or newer is already available to everyone on the store.`,
+        confirmLabel: 'Raise the minimum',
+        tone: 'danger',
+        field: { label: 'Why is this needed?', required: true, placeholder: 'e.g. Build 3 fixes the notification crash' },
+      });
+      if (reason == null) return;
+      payload.reason = reason;
+      payload.confirm_min_raise = true;
+    }
+    await busy(btn, async () => {
+      await act('app_config.save', id, payload);
+      toast('Saved. The app picks this up the next time it opens.', 'success');
+      renderCurrent();
+    });
   };
 
   // ── Boot ───────────────────────────────────────────────────────────────────
