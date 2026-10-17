@@ -1,3 +1,5 @@
+@font-face { font-family: 'Nunito'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('fonts/Nunito.ttf') format('truetype'); }
+@font-face { font-family: 'Montserrat'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('fonts/Montserrat.ttf') format('truetype'); }
 /* =============================================================================
    DoggyJi Admin Portal
    Dark / light theme, Nunito headings and Montserrat body, as in the app.
@@ -39,7 +41,7 @@
   --border-strong: rgba(255, 255, 255, 0.16);
   --text: #F1F5F9;
   --text-2: #A3B1C6;
-  --text-3: #6B7A90;
+  --text-3: #A3B1C6;
   --shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.55);
   --shadow-modal: 0 25px 60px -12px rgba(0, 0, 0, 0.8);
   color-scheme: dark;
@@ -56,7 +58,7 @@
   --border-strong: rgba(15, 23, 42, 0.18);
   --text: #0F172A;
   --text-2: #475569;
-  --text-3: #94A3B8;
+  --text-3: #526175;
   --shadow: 0 8px 24px -8px rgba(15, 23, 42, 0.12);
   --shadow-modal: 0 25px 50px -12px rgba(15, 23, 42, 0.3);
   color-scheme: light;
@@ -469,3 +471,6 @@ html[data-env="staging"] body::before {
 /* One height for every control in the row, so the buttons line up with the dropdowns. */
 .order-filters .select, .order-filters .input, .order-filters .btn { height: 40px; box-sizing: border-box; }
 .order-filters .btn { padding: 0 14px; font-size: 13px; }
+
+/* Keep keyboard focus visible across portal controls. */
+:focus-visible { outline: 3px solid var(--teal); outline-offset: 3px; }

@@ -27,6 +27,11 @@
   // project, so staff features can be tried on test data; the published site
   // (GitHub Pages / Netlify) always uses production. Since 1 Oct 2026
   // production is the Mumbai project and staging the former Sydney one.
+  // Staff two-factor sign-in (an authenticator app code). Built and tested,
+  // but off for now (owner, 17 Oct 2026). To switch it on: set this to true,
+  // set the admin-action secret REQUIRE_STAFF_MFA=true, and publish.
+  const REQUIRE_STAFF_MFA = false;
+
   const IS_STAGING = ['localhost', '127.0.0.1'].includes(location.hostname);
   const SUPABASE_URL = IS_STAGING
     ? 'https://iythfpzwxrbvxfmutxai.supabase.co'
@@ -266,11 +271,13 @@
     $('#authScreen').hidden = false;
     $('#signInForm').hidden = mode !== 'signin';
     $('#forgotForm').hidden = mode !== 'forgot';
+    $('#mfaForm').hidden = mode !== 'mfa';
     if (mode === 'forgot') resetForgotForm();
     $('#setPasswordForm').hidden = mode !== 'set-password';
     $('#authSubtitle').textContent = {
       signin: 'Sign in with your staff account',
       forgot: 'Reset your password',
+      mfa: 'Protect your staff account',
       'set-password': note === 'invite' ? 'Welcome — set your password'
         : note === 'temp' ? 'Choose your own password' : 'Set a new password',
     }[mode];
@@ -320,6 +327,8 @@
       return;
     }
 
+    if (!await requireStaffMfa()) return;
+
     const [{ data: perms }, { data: role }] = await Promise.all([
       sb.from('admin_role_permissions').select('permission_id').eq('role_id', staff.role_id),
       sb.from('admin_roles').select('name').eq('id', staff.role_id).maybeSingle(),
@@ -338,6 +347,69 @@
     else route();
     refreshCounts();
   }
+
+  let mfaFactorId = null;
+  async function requireStaffMfa() {
+    // Off until the owner switches staff two-factor on (REQUIRE_STAFF_MFA at
+    // the top of this file, and the REQUIRE_STAFF_MFA secret for admin-action).
+    if (!REQUIRE_STAFF_MFA) return true;
+    const { data: assurance, error: assuranceError } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (assuranceError) throw assuranceError;
+    if (assurance?.currentLevel === 'aal2') return true;
+    // Hide any previously loaded privileged UI before making more requests.
+    me.staff = null;
+    me.perms = new Set();
+    showAuth('mfa');
+    $('#mfaCode').value = '';
+    $('#mfaQr').removeAttribute('src');
+    $('#mfaSecret').textContent = '';
+    $('#mfaSetup').hidden = true;
+    const { data: factors, error: factorsError } = await sb.auth.mfa.listFactors();
+    if (factorsError) throw factorsError;
+    mfaFactorId = factors.totp.find((f) => f.status === 'verified')?.id || null;
+    if (!mfaFactorId) {
+      // A reload during enrollment leaves an unverified factor. Remove only
+      // those abandoned factors; never remove a verified authenticator here.
+      for (const factor of factors.all.filter((f) => f.factor_type === 'totp' && f.status === 'unverified')) {
+        const { error } = await sb.auth.mfa.unenroll({ factorId: factor.id });
+        if (error) throw error;
+      }
+      const { data, error } = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Doggy Ji staff' });
+      if (error) throw error;
+      mfaFactorId = data.id;
+      // Supabase supplies an SVG; render in an img, never inject SVG as HTML.
+      $('#mfaQr').src = data.totp.qr_code.startsWith('data:image/')
+        ? data.totp.qr_code : `data:image/svg+xml;charset=utf-8,${encodeURIComponent(data.totp.qr_code)}`;
+      $('#mfaSecret').textContent = data.totp.secret;
+      $('#mfaSetup').hidden = false;
+      $('#mfaNote').textContent = 'Add Doggy Ji to your authenticator app, then enter its six-digit code.';
+    } else {
+      $('#mfaNote').textContent = 'Enter the six-digit code from your authenticator app.';
+    }
+    $('#mfaCode').focus();
+    return false;
+  }
+
+  $('#mfaForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = event.submitter || $('#mfaForm button[type=submit]');
+    const code = $('#mfaCode').value.trim();
+    if (!mfaFactorId || !/^[0-9]{6}$/.test(code)) return;
+    button.disabled = true;
+    try {
+      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: mfaFactorId, code });
+      if (error) throw error;
+      $('#mfaCode').value = '';
+      $('#mfaSecret').textContent = '';
+      $('#mfaQr').removeAttribute('src');
+      await enter(true);
+    } catch (error) {
+      toast(error.message || 'Could not verify the code. Try again.', 'error');
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('#mfaSignOut').addEventListener('click', () => signOut());
 
   $('#signInForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -449,6 +521,12 @@
   });
 
   sb.auth.onAuthStateChange((event) => {
+    if (event === 'SIGNED_OUT') {
+      me.staff = null; me.perms = new Set();
+      $('#mfaSecret').textContent = '';
+      $('#mfaQr').removeAttribute('src');
+      showAuth('signin');
+    }
     if (event === 'PASSWORD_RECOVERY') showAuth('set-password', 'recovery');
   });
 
@@ -826,8 +904,20 @@
           <div class="chart-box"><canvas id="activityChart"></canvas></div></div>`
       : '';
 
+    let operations = '';
+    if (can('audit.view')) {
+      try {
+        const health = await act('operations.status', 'queues', {});
+        const names = { notification_outbox: 'Notification delivery', account_erasure_jobs: 'Account cleanup', message_schedules: 'Scheduled announcements' };
+        operations = `<div class="card card-pad"><h3>Background work</h3>${Object.entries(health).map(([key, counts]) =>
+          `<p><strong>${esc(names[key] || key)}</strong>: ${Object.entries(counts).map(([status, count]) => `${esc(count)} ${esc(status)}`).join(' · ')}</p>`).join('')}
+          <p class="note">Failed items need operator review. Pending work should decrease after the minute worker runs. These are queue counts, not confirmation that a phone displayed a message.</p></div>`;
+      } catch (_) {
+        operations = '<div class="card card-pad" role="alert">Background work status could not be loaded. Check the worker and database setup.</div>';
+      }
+    }
     return `
-      <div class="metrics">${metrics || ''}</div>
+      <div class="metrics">${metrics || ''}</div>${operations}
       <div class="${chart ? 'grid-2' : ''}">
         ${chart}
         <div class="stack">
@@ -2249,6 +2339,7 @@
 
   RENDER.announce = async () => {
     const rows = await q(sb.from('admin_broadcasts').select('*').order('created_at', { ascending: false }).limit(50));
+    const schedules = await q(sb.from('message_schedules').select('*').order('created_at', { ascending: false }).limit(100));
     const dayAgo = Date.now() - 864e5;
     const used = rows.filter((r) => r.audience !== 'user' && r.status !== 'failed' && new Date(r.created_at) > dayAgo).length;
     const d = announceDraft;
@@ -2270,7 +2361,16 @@
       <div class="toolbar" style="margin:12px 0 0">
         <button class="btn btn-outline" data-action="announce-preview">Check reach</button>
         <span class="grow"></span>
-        <button class="btn btn-primary" data-action="announce-send">Send announcement</button>
+        <button class="btn btn-primary" data-action="announce-send">Send announcement now</button>
+      </div>
+      <div class="section-title">Schedule for later</div>
+      <div class="field"><label for="anStart">First send · India time (Asia/Kolkata)</label><input class="input" id="anStart" type="datetime-local"></div>
+      <div class="field-row">
+        <div class="field"><label for="anRepeat">Repeat</label><select class="select" id="anRepeat"><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></div>
+        <div class="field"><label for="anRuns">Total sends (including first)</label><input class="input" id="anRuns" type="number" min="1" max="365" value="1"></div>
+      </div>
+      <p class="note">Audience and permissions are checked when due. Group limits still apply. Missed times after downtime are skipped; delivery may take several minutes. Promotions in Doggy Ji chat are still sent separately.</p>
+      <div class="toolbar"><button class="btn btn-outline" data-action="announce-schedule">Review and schedule</button>
       </div>
       <p class="note">Group announcements used in the last 24 hours: ${esc(used)} of ${GROUP_LIMIT}. Messages to one person are not limited.
         People who turned off “News &amp; announcements” in the app get the inbox message without a push. Suspended accounts get nothing.</p>
@@ -2291,7 +2391,14 @@
       </tr>`).join('')}</tbody></table></div>`
       : emptyHtml('📣', 'Nothing sent yet', 'Announcements you send appear here with how many people they reached.');
 
-    return `<div class="grid-2">${form}${preview}</div><div class="section-title">Sent</div><div class="card">${history}</div>`;
+    const scheduleList = schedules.map((r) => `<div class="card card-pad">
+      <strong>${esc(r.payload.title)}</strong> · ${esc(r.status)}
+      <p>${esc(new Date(r.next_run_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }))} IST · ${esc(r.recurrence)} · ${esc(r.remaining_runs)} sends left</p>
+      ${r.last_error ? `<p role="alert">${esc(r.last_error)}</p>` : ''}
+      ${['active', 'paused'].includes(r.status) ? `<button class="btn btn-outline" data-action="schedule-${r.status === 'active' ? 'pause' : 'resume'}" data-id="${esc(r.id)}">${r.status === 'active' ? 'Pause' : 'Resume'}</button>
+      <button class="btn btn-outline" data-action="schedule-cancel" data-id="${esc(r.id)}">Cancel future sends</button>` : ''}
+      </div>`).join('') || '<p>No scheduled announcements.</p>';
+    return `<div class="grid-2">${form}${preview}</div><div class="section-title">Scheduled announcements</div>${scheduleList}<div class="section-title">Sent</div><div class="card">${history}</div>`;
   };
 
   function readAnnouncement() {
@@ -2440,6 +2547,33 @@
         : 'Nobody matches this audience.';
     });
   };
+
+  ACTIONS['announce-schedule'] = async (_, btn) => {
+    const d = readAnnouncement();
+    const problem = announcementProblem(d);
+    if (problem) { toast(problem, 'warning'); return; }
+    const start = $('#anStart').value;
+    const date = new Date(`${start}:00+05:30`);
+    const repeat = $('#anRepeat').value;
+    const runs = repeat === 'once' ? 1 : Number($('#anRuns').value);
+    if (!start || !Number.isFinite(date.getTime()) || date <= new Date() || !Number.isInteger(runs) || runs < 1 || runs > 365) {
+      toast('Choose a future India time and 1–365 sends.', 'warning'); return;
+    }
+    const ok = await confirmBox({ title: 'Schedule this announcement?',
+      message: `“${d.title}” to ${audienceLabel(d.audience, d.audience_value)}. Starts ${start.replace('T', ' ')} IST; ${repeat}, ${runs} send(s). Group limits and preferences apply at delivery.`, confirmLabel: 'Schedule' });
+    if (ok == null) return;
+    await busy(btn, async () => {
+      await act('schedule.create', 'new', { broadcast: d, start: date.toISOString(), repeat, runs });
+      toast('Announcement scheduled.', 'success'); announceDraft = blankAnnouncement(); renderCurrent();
+    });
+  };
+  for (const [action, status] of [['pause', 'paused'], ['resume', 'active'], ['cancel', 'cancelled']]) {
+    ACTIONS[`schedule-${action}`] = async (id, btn) => {
+      const ok = await confirmBox({ title: `${titleCase(action)} schedule?`, message: 'This affects future sends. A message already queued or delivered cannot be recalled.', confirmLabel: titleCase(action) });
+      if (ok == null) return;
+      await busy(btn, async () => { await act('schedule.status', id, { id, status }); renderCurrent(); });
+    };
+  }
 
   ACTIONS['announce-send'] = async (_, btn) => {
     const d = readAnnouncement();
@@ -3097,7 +3231,7 @@
     await busy(btn, async () => {
       const f = state.orders;
       const rows = await allFilteredOrders(f, 'id, shopify_order_id, placed_at, status, customer_name, customer_email, customer_phone, shipping_address, subtotal, discount_amount, shipping_amount, total_amount, coupon_code, payment_method, checkout_intent_id, user_id');
-      const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const cell = csvCell;
       const head = ['Order', 'Shopify id', 'Placed', 'Source', 'Status', 'Customer', 'Email', 'Phone', 'Ship to', 'Subtotal', 'Discount', 'Shipping', 'Total', 'Coupon', 'Payment', 'App account'];
       const lines = rows.map((o) => [o.id, o.shopify_order_id, fmtDateTime(o.placed_at), fromApp(o) ? 'App' : 'Website', titleCase(o.status || ''),
         o.customer_name, o.customer_email, o.customer_phone, o.shipping_address, o.subtotal, o.discount_amount, o.shipping_amount,
@@ -3561,5 +3695,8 @@
     await enter(false);
   }
 
-  boot();
+  boot().catch((error) => {
+    showAuth('signin');
+    toast(error.message || 'Could not load staff access. Please try again.', 'error');
+  });
 })();

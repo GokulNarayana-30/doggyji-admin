@@ -3,25 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self' https://jyzyvwdwcrgbtxfqcscg.supabase.co wss://jyzyvwdwcrgbtxfqcscg.supabase.co https://iythfpzwxrbvxfmutxai.supabase.co wss://iythfpzwxrbvxfmutxai.supabase.co https://www.doggyji.com; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
   <title>DoggyJi Admin</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐾</text></svg>">
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="vendor/chart-4.4.4.js" integrity="sha384-NrKB+u6Ts6AtkIhwPixiKTzgSKNblyhlk0Sohlgar9UHUBzai/sgnNNWWd291xqt"></script>
+  <script src="vendor/supabase-2.117.2.js" integrity="sha384-Rj26LVGvoeRVR6+mwQmFfcR3QOBEwT+ZmuCWpuiqeTzJpCs0ER4ITAWGb4Hiy3Ok"></script>
 
   <link rel="stylesheet" href="style.css">
-  <script>
-    // Apply the saved theme before first paint, so the page does not flash.
-    try {
-      const t = localStorage.getItem('doggyji_admin_theme');
-      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-    } catch (_) {}
-  </script>
+  <script src="theme-init.js"></script>
 </head>
 <body>
 
@@ -51,6 +44,22 @@
           <span></span>
           <button type="button" data-action="show-auth" data-id="forgot">Forgot password?</button>
         </div>
+      </form>
+
+      <form id="mfaForm" hidden>
+        <p id="mfaNote" class="note"></p>
+        <div id="mfaSetup" hidden>
+          <img id="mfaQr" alt="Scan this QR code with your authenticator app" width="220" height="220">
+          <p class="hint">Or enter this setup key in your authenticator:</p>
+          <code id="mfaSecret" style="overflow-wrap:anywhere"></code>
+        </div>
+        <div class="field">
+          <label for="mfaCode">Authenticator code</label>
+          <input class="input" id="mfaCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit">Verify and continue</button>
+        <p class="hint">Lost your authenticator? Contact your account owner for identity-checked recovery.</p>
+        <button class="btn btn-outline btn-block" type="button" id="mfaSignOut">Sign out</button>
       </form>
 
       <form id="forgotForm" hidden>
@@ -133,6 +142,7 @@
   <div id="modalRoot"></div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
+  <script src="csv.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
