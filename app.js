@@ -2367,8 +2367,9 @@
       <div class="field"><label for="anStart">First send · India time (Asia/Kolkata)</label><input class="input" id="anStart" type="datetime-local"></div>
       <div class="field-row">
         <div class="field"><label for="anRepeat">Repeat</label><select class="select" id="anRepeat"><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></div>
-        <div class="field"><label for="anRuns">Total sends (including first)</label><input class="input" id="anRuns" type="number" min="1" max="365" value="1"></div>
+        <div class="field" id="anEndField" hidden><label for="anEnd">Last day (end date)</label><input class="input" id="anEnd" type="date"></div>
       </div>
+      <p class="cell-sub" id="anPlan"></p>
       <p class="note">Audience and permissions are checked when due. Group limits still apply. Missed times after downtime are skipped; delivery may take several minutes. Promotions in Doggy Ji chat are still sent separately.</p>
       <div class="toolbar"><button class="btn btn-outline" data-action="announce-schedule">Review and schedule</button>
       </div>
@@ -2529,6 +2530,25 @@
       readAnnouncement();
     });
     counts();
+    // Start date, repeat and end date: say how many sends that makes.
+    const plan = () => {
+      const repeat = $('#anRepeat').value;
+      $('#anEndField').hidden = repeat === 'once';
+      const note = $('#anPlan');
+      if (repeat === 'once') { note.textContent = 'Sent once, at the time above.'; return; }
+      const r = scheduleRuns($('#anStart').value, repeat, $('#anEnd').value);
+      if (r.error) { note.textContent = $('#anStart').value || $('#anEnd').value ? r.error : ''; return; }
+      const day = (iso) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+      note.textContent = `${r.runs} send${r.runs === 1 ? '' : 's'}, ${repeat}: the first on ${day($('#anStart').value.slice(0, 10))}, the last on ${day(r.lastDate)}.`;
+    };
+    ['anStart', 'anRepeat', 'anEnd'].forEach((f) => {
+      const el = document.getElementById(f);
+      el.addEventListener('input', plan);
+      el.addEventListener('change', plan);
+    });
+    // The end date can't be before the first send.
+    $('#anStart').addEventListener('change', () => { $('#anEnd').min = $('#anStart').value.slice(0, 10); });
+    plan();
     attachUserSuggest('anValue', () => $('#anAudience').value === 'user');
   };
 
@@ -2555,12 +2575,16 @@
     const start = $('#anStart').value;
     const date = new Date(`${start}:00+05:30`);
     const repeat = $('#anRepeat').value;
-    const runs = repeat === 'once' ? 1 : Number($('#anRuns').value);
-    if (!start || !Number.isFinite(date.getTime()) || date <= new Date() || !Number.isInteger(runs) || runs < 1 || runs > 365) {
-      toast('Choose a future India time and 1–365 sends.', 'warning'); return;
+    if (!start || !Number.isFinite(date.getTime()) || date <= new Date()) {
+      toast('Choose a first send in the future (India time).', 'warning'); return;
     }
+    // The number of sends comes from the end date: both days are counted.
+    const plan = scheduleRuns(start, repeat, $('#anEnd').value);
+    if (plan.error) { toast(plan.error, 'warning'); return; }
+    const runs = plan.runs;
+    const when = repeat === 'once' ? 'once' : `${repeat}, ${runs} send${runs === 1 ? '' : 's'}, last on ${plan.lastDate}`;
     const ok = await confirmBox({ title: 'Schedule this announcement?',
-      message: `“${d.title}” to ${audienceLabel(d.audience, d.audience_value)}. Starts ${start.replace('T', ' ')} IST; ${repeat}, ${runs} send(s). Group limits and preferences apply at delivery.`, confirmLabel: 'Schedule' });
+      message: `“${d.title}” to ${audienceLabel(d.audience, d.audience_value)}. Starts ${start.replace('T', ' ')} IST; ${when}. Group limits and preferences apply at delivery.`, confirmLabel: 'Schedule' });
     if (ok == null) return;
     await busy(btn, async () => {
       await act('schedule.create', 'new', { broadcast: d, start: date.toISOString(), repeat, runs });
