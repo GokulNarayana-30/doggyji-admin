@@ -1,7 +1,0 @@
-{
-  "name": "doggyji-admin-browser-dependencies",
-  "private": true,
-  "version": "1.0.0",
-  "scripts": {"test": "node vendor_test.mjs && node csv_test.mjs && node schedule_test.mjs && node mfa_test.mjs"},
-  "dependencies": {"@supabase/supabase-js": "2.117.2", "chart.js": "4.4.4"}
-}
