@@ -678,6 +678,8 @@
     { id: 'support', label: 'Support', icon: '💬', section: 'Doggy Ji chat', perms: ['support.manage'],
       title: 'Support', subtitle: 'Customers writing to Doggy Ji from the app',
       count: () => countOf('support_threads', (b) => b.eq('status', 'open')) },
+    { id: 'faq', label: 'Help answers', icon: '❓', section: 'Doggy Ji chat', perms: ['support.manage'],
+      title: 'Help answers', subtitle: 'The App help questions customers see in the Doggy Ji chat' },
     { id: 'promote', label: 'Promotions', icon: '🏷️', section: 'Doggy Ji chat', perms: ['notifications.send'],
       title: 'Promotions', subtitle: 'Offers and products, posted in everyone’s Doggy Ji chat' },
     { id: 'banners', label: 'Home banners', icon: '🖼️', section: 'Content', perms: ['banners.manage'],
@@ -2873,10 +2875,15 @@
       query = query.in('user_id', hits.length ? hits.map((h) => h.id) : ['-']);
     }
     const oldestFirst = sort === 'old';
-    query = query.order('last_message_at', { ascending: oldestFirst }).order('id', { ascending: oldestFirst });
-    const [{ rows, total }, open] = await Promise.all([
+    // Customers who asked for a person come first.
+    query = query.order('wants_agent', { ascending: false })
+      .order('last_message_at', { ascending: oldestFirst }).order('id', { ascending: oldestFirst });
+    const [{ rows, total }, open, autoRows] = await Promise.all([
       pageOf(query, page),
       countOf('support_threads', (b) => b.eq('status', 'open')),
+      // Missing until the migration is live: the panel simply doesn't show.
+      sb.from('support_auto_reply').select('enabled, greeting, followup, updated_at').limit(1)
+        .then(({ data }) => data || [], () => []),
     ]);
     const people = await profilesFor(rows.map((r) => r.user_id));
     const toolbar = `<div class="toolbar">
@@ -2894,12 +2901,131 @@
         <td>${personCell(people[t.user_id], t.user_id)}</td>
         <td><div class="cell-sub">${t.last_sender === 'staff' ? 'Us: ' : ''}${esc(t.last_message_text || '')}</div></td>
         <td class="nowrap">${esc(ago(t.last_message_at))}</td>
-        <td>${badge({ open: 'Waiting for us', replied: 'Replied', closed: 'Closed' }[t.status] || t.status, { open: 'red', replied: 'blue', closed: 'slate' }[t.status] || 'slate')}</td>
+        <td>${badge({ open: 'Waiting for us', replied: 'Replied', closed: 'Closed' }[t.status] || t.status, { open: 'red', replied: 'blue', closed: 'slate' }[t.status] || 'slate')}${t.wants_agent ? ` ${badge('🙋 Asked for an agent', 'amber')}` : ''}</td>
         <td class="nowrap"><button class="btn btn-outline btn-sm" data-action="open-thread" data-id="${esc(t.id)}">Open</button></td>
       </tr>`).join('')}</tbody></table></div>`
       : emptyHtml('💬', 'Nothing here', term ? 'No conversation matches that customer.' : (status === 'open' ? 'No customer is waiting for a reply.' : 'No conversations in this list.'));
-    return `${toolbar}<div class="card">${table}</div>${pagerHtml('support', page, total)}
-      <p class="note">Customers write from Help &amp; Support or the pinned “Doggy Ji” chat in the app’s Messages. Your reply appears in their chat as “Doggy Ji” (your name shows only here) and they get a push notification.</p>`;
+    return `${toolbar}${autoReplyHtml(autoRows[0])}<div class="card">${table}</div>${pagerHtml('support', page, total)}
+      <p class="note">🙋 <strong>Asked for an agent</strong>: the customer tapped “Talk to an agent” in the app; these come first and the flag clears when you reply or close. Customers write from Help &amp; Support or the pinned “Doggy Ji” chat in the app’s Messages. Your reply appears in their chat as “Doggy Ji” (your name shows only here) and they get a push notification.</p>`;
+  };
+
+  // The automatic greeting and follow-up (support_auto_reply, one row).
+  function autoReplyHtml(a) {
+    if (!a) return '';
+    return `<details class="card" style="padding:12px 16px;margin-bottom:12px">
+      <summary><strong>Automatic replies</strong> · ${a.enabled ? badge('On', 'green') : badge('Off', 'slate')}</summary>
+      <p class="hint">When a customer starts a conversation (their first message, or the first after 12 hours or after you closed it), the chat answers at once with the greeting. When they reply to it, the follow-up goes once. Neither marks the conversation as answered, and neither sends a push. <code>{name}</code> becomes the customer's first name.</p>
+      <div class="field"><label class="check"><input type="checkbox" id="arEnabled" ${a.enabled ? 'checked' : ''}> Send automatic replies</label></div>
+      <div class="field"><label for="arGreeting">Greeting *</label><textarea class="textarea" id="arGreeting" maxlength="1000">${esc(a.greeting)}</textarea></div>
+      <div class="field"><label for="arFollowup">Follow-up *</label><textarea class="textarea" id="arFollowup" maxlength="1000">${esc(a.followup)}</textarea></div>
+      <button class="btn btn-primary btn-sm" data-action="save-autoreply" data-id="auto">Save</button>
+      <span class="hint">Last changed ${esc(ago(a.updated_at))}</span>
+    </details>`;
+  }
+
+  ACTIONS['save-autoreply'] = async (_id, el) => {
+    const greeting = document.getElementById('arGreeting')?.value.trim() || '';
+    const followup = document.getElementById('arFollowup')?.value.trim() || '';
+    const enabled = !!document.getElementById('arEnabled')?.checked;
+    if (!greeting || !followup) { toast('Write both the greeting and the follow-up.', 'warning'); return; }
+    await busy(el, async () => {
+      await act('support.autoreply', 'settings', { greeting, followup, enabled });
+      toast(enabled ? 'Automatic replies saved.' : 'Automatic replies are off.', 'success');
+      renderCurrent();
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Help answers: App help in the Doggy Ji chat (support_faq)
+  // ════════════════════════════════════════════════════════════════════════════
+  const FAQ_SECTIONS = [
+    ['pet_match', 'Pet Match'], ['blood_bank', 'Blood Bank'], ['vets', 'Vet Finder'],
+    ['pet_services', 'Pet Services'], ['pets', 'My pets & health'], ['shop', 'Shop & orders'], ['account', 'Account'],
+  ];
+  // The same keys as support_faq_link_check and supportFaqLinks in the app.
+  const FAQ_LINKS = [
+    ['', 'No button'], ['pet_match', 'Pet Match'], ['blood_bank', 'Blood Bank'], ['blood_sos', 'Blood SOS'],
+    ['register_donor', 'Register as donor'], ['vets', 'Vet Finder'], ['pet_services', 'Pet Services'],
+    ['become_provider', 'Become a provider'], ['my_bookings', 'My bookings'], ['vaccines', 'Vaccine Log'],
+    ['my_pet', 'My Pet'], ['lost_found', 'Lost & Found'], ['shop', 'Shop'], ['orders', 'My Orders'],
+    ['profile', 'Profile'], ['notification_settings', 'Notification Settings'],
+  ];
+  let faqRows = [];
+
+  RENDER.faq = async () => {
+    faqRows = await q(sb.from('support_faq').select('*').order('section').order('position').limit(500));
+    const linkLabel = Object.fromEntries(FAQ_LINKS);
+    const groups = FAQ_SECTIONS.map(([key, label]) => {
+      const rows = faqRows.filter((f) => f.section === key);
+      return `<div class="card" style="margin-bottom:12px"><h3 style="margin:0 0 8px">${esc(label)}</h3>
+        ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Question and answer</th><th>Button</th><th>Shown</th><th></th></tr></thead><tbody>
+        ${rows.map((f) => `<tr>
+          <td>${esc(String(f.position))}</td>
+          <td><strong>${esc(f.question)}</strong><div class="cell-sub">${esc(f.answer)}</div></td>
+          <td>${esc(linkLabel[f.link || ''] || f.link || '')}</td>
+          <td>${f.is_published ? badge('Shown', 'green') : badge('Hidden', 'slate')}</td>
+          <td class="nowrap"><button class="btn btn-outline btn-sm" data-action="faq-edit" data-id="${esc(f.id)}">Edit</button>
+            <button class="btn btn-ghost btn-sm" data-action="faq-delete" data-id="${esc(f.id)}">Delete</button></td>
+        </tr>`).join('')}</tbody></table></div>` : '<p class="hint">No questions in this section.</p>'}
+      </div>`;
+    }).join('');
+    return `<div class="toolbar"><span class="grow"></span><button class="btn btn-primary" data-action="faq-edit" data-id="new">Add a question</button></div>
+      ${groups}
+      <p class="note">Customers see these under <strong>App help</strong> in the Doggy Ji chat, grouped by section and in the order of #. Each answer can show a button that opens that part of the app, and always offers “Talk to an agent”. Keep answers short and true to how the app works today.</p>`;
+  };
+
+  ACTIONS['faq-edit'] = (id) => {
+    const f = id === 'new' ? { section: 'pet_match', position: 1, is_published: true } : faqRows.find((r) => r.id === id);
+    if (!f) return;
+    const opts = (list, chosen) => list.map(([k, l]) => `<option value="${esc(k)}" ${k === (chosen || '') ? 'selected' : ''}>${esc(l)}</option>`).join('');
+    openModal({
+      title: id === 'new' ? 'Add a question' : 'Edit question',
+      body: `<div class="field-row">
+          <div class="field"><label for="faqSection">Section *</label><select class="select" id="faqSection">${opts(FAQ_SECTIONS, f.section)}</select></div>
+          <div class="field"><label for="faqPos">Order (#)</label><input class="input" id="faqPos" type="number" min="0" max="999" value="${esc(String(f.position ?? 0))}"></div>
+        </div>
+        <div class="field"><label for="faqQ">Question *</label><input class="input" id="faqQ" maxlength="200" value="${esc(f.question || '')}"></div>
+        <div class="field"><label for="faqA">Answer *</label><textarea class="textarea" id="faqA" maxlength="2000" rows="5">${esc(f.answer || '')}</textarea></div>
+        <div class="field"><label for="faqLink">Button that opens</label><select class="select" id="faqLink">${opts(FAQ_LINKS, f.link)}</select></div>
+        <label class="check"><input type="checkbox" id="faqPub" ${f.is_published ? 'checked' : ''}> Show to customers</label>`,
+      foot: `<button class="btn btn-ghost" data-action="m" data-id="cancel">Cancel</button>
+             <button class="btn btn-primary" data-action="m" data-id="save">Save</button>`,
+      handlers: {
+        cancel: () => closeModal(),
+        save: (el) => {
+          const faq = {
+            section: $('#faqSection').value,
+            position: Number.parseInt($('#faqPos').value, 10) || 0,
+            question: $('#faqQ').value.trim(),
+            answer: $('#faqA').value.trim(),
+            link: $('#faqLink').value || null,
+            is_published: $('#faqPub').checked,
+          };
+          if (!faq.question || !faq.answer) { toast('Write the question and the answer.', 'warning'); return; }
+          return busy(el, async () => {
+            await act('faq.save', id, { faq });
+            closeModal();
+            toast('Saved.', 'success');
+            renderCurrent();
+          });
+        },
+      },
+    });
+  };
+
+  ACTIONS['faq-delete'] = async (id, el) => {
+    const f = faqRows.find((r) => r.id === id);
+    if (!f) return;
+    const ok = await confirmBox({
+      title: 'Delete this question?', message: `“${f.question}” will no longer show in App help.`,
+      confirmLabel: 'Delete', tone: 'danger',
+    });
+    if (ok == null) return;
+    await busy(el, async () => {
+      await act('faq.delete', id, {});
+      toast('Deleted.', 'success');
+      renderCurrent();
+    });
   };
 
   AFTER.support = () => {
@@ -2955,9 +3081,13 @@
     if (!msgs.length) return emptyHtml('💬', 'No messages', 'This conversation is empty.');
     return msgs.map((m) => {
       const staff = m.sender === 'staff';
-      const who = staff ? `${m.staff_name || 'Staff'} (Doggy Ji)` : customerName;
+      const who = m.auto ? 'Auto reply (Doggy Ji)' : staff ? `${m.staff_name || 'Staff'} (Doggy Ji)` : customerName;
+      // The order or booking the customer chose in the app's help.
+      const about = m.order_id
+        ? ` · <button class="btn btn-ghost btn-sm" data-action="open-order" data-id="${esc(m.order_id)}">📦 Order ${esc(m.order_id)}</button>`
+        : m.booking_id ? ` · ${badge('About a booking', 'teal')} <code>${esc(String(m.booking_id).slice(0, 8))}</code>` : '';
       return `<div class="support-msg ${staff ? 'staff' : 'customer'}">
-        <div class="support-meta">${esc(who)} · ${esc(fmtDateTime(m.created_at))}${m.topic ? ` · ${badge(TOPIC_LABEL[m.topic] || m.topic, 'blue')}` : ''}${m.promotion_id ? ` · ${badge('About an offer', 'amber')}` : ''}</div>
+        <div class="support-meta">${esc(who)} · ${esc(fmtDateTime(m.created_at))}${m.topic ? ` · ${badge(TOPIC_LABEL[m.topic] || m.topic, 'blue')}` : ''}${m.promotion_id ? ` · ${badge('About an offer', 'amber')}` : ''}${about}</div>
         <div class="support-body">${esc(m.body)}</div>
       </div>`;
     }).join('');
