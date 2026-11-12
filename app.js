@@ -628,6 +628,8 @@
     directory: { kind: 'vet_clinics', status: 'pending' },
     blood: { tab: 'requests', status: 'active' },
     lost: { status: 'open' },
+    content: { tab: 'reviews' },
+    cities: { service: 'all' },
     orders: { q: '', source: 'all', page: 0, size: 100, range: 'all', from: '', to: '', status: '', sort: 'new' },
     support: { status: 'open', q: '', sort: 'new', page: 0 },
     audit: { result: 'all', q: '', from: '', to: '', page: 0 },
@@ -644,6 +646,8 @@
     { id: 'lost', label: 'Lost pets', icon: '🔎', section: 'Trust & safety', perms: ['reports.view', 'reports.manage'],
       title: 'Lost pets', subtitle: 'Lost & Found alerts: each one reaches everyone in its city',
       count: () => countOf('lost_pet_alerts', (b) => b.eq('status', 'open').gt('created_at', new Date(Date.now() - LOST_LIVE_MS).toISOString())), soft: true },
+    { id: 'content', label: 'Content review', icon: '🧹', section: 'Trust & safety', perms: ['reports.view', 'reports.manage'],
+      title: 'Content review', subtitle: 'Reviews, Pet Moments, Pet Match pets and donor listings: remove one item without suspending the account' },
     { id: 'providers', label: 'Service providers', icon: '🛡️', section: 'Services', perms: ['providers.view'],
       title: 'Service providers', subtitle: 'Applications, KYC documents and verification',
       count: () => countOf('service_providers', (b) => b.eq('verification_status', 'pending')) },
@@ -659,6 +663,9 @@
         ]);
         return (a ?? 0) + (b ?? 0);
       } },
+    { id: 'cities', label: 'City requests', icon: '📍', section: 'Services', perms: ['clinics.view', 'clinics.approve', 'notifications.send'],
+      title: 'City requests', subtitle: 'Where people tapped “Tell me when” for clinics, blood banks and pet care',
+      count: () => countOf('service_interest', (b) => b.is('notified_at', null)), soft: true },
     { id: 'blood', label: 'Blood SOS', icon: '🩸', section: 'Emergency', perms: ['blood.view', 'blood.manage', 'blood.contact'],
       title: 'Blood SOS', subtitle: 'Emergency requests, donor responses and call requests',
       count: async () => {
@@ -830,7 +837,10 @@
       jobs.users = countOf('profiles');
       jobs.newUsers = countOf('profiles', (b) => b.gte('created_at', week));
     }
-    if (can('orders.view', 'orders.manage')) jobs.orders = countOf('orders', (b) => b.gte('placed_at', week));
+    if (can('orders.view', 'orders.manage')) {
+      jobs.orders = countOf('orders', (b) => b.gte('placed_at', week));
+      jobs.refunds = countOf('orders', (b) => b.eq('cancel_refund_due', true));
+    }
     if (can('support.manage')) {
       jobs.support = countOf('support_threads', (b) => b.eq('status', 'open'));
       // How long the longest-waiting customer has waited: '' none, null unknown.
@@ -870,11 +880,12 @@
       ['reports', '🚩', 'User reports to review', 'reports'],
       ['providers', '🛡️', 'Provider applications to verify', 'providers'],
       ['support', '💬', 'Customers waiting for a support reply', 'support'],
+      ['refunds', '💸', 'Orders cancelled in the app, waiting for a refund', 'orders'],
     ].filter(([k]) => n[k] > 0);
     if (listings > 0) attention.push(['listings', '🏥', 'Clinic / blood bank listings to review', 'directory']);
 
     // A count that could not be read is not zero: say so instead of an all-clear.
-    const CHECKED = { sos: 'blood SOS', calls: 'call requests', reports: 'reports', providers: 'providers', clinics: 'clinic listings', banks: 'blood bank listings', support: 'support' };
+    const CHECKED = { sos: 'blood SOS', calls: 'call requests', reports: 'reports', providers: 'providers', clinics: 'clinic listings', banks: 'blood bank listings', support: 'support', refunds: 'refunds due' };
     const unchecked = Object.keys(CHECKED).filter((k) => k in n && n[k] == null).map((k) => CHECKED[k]);
     const uncheckedHtml = unchecked.length
       ? `<p class="note" style="margin:0 16px 14px">⚠️ Could not check: ${esc(unchecked.join(', '))}. This list may be incomplete. Press Refresh to try again.</p>`
@@ -899,8 +910,8 @@
 
     // The chart draws sign-ups, SOS requests and reports; a role that can
     // read none of them would get an empty chart.
-    const chart = can('users.view', 'users.manage', 'blood.view', 'blood.manage', 'blood.contact', 'reports.view', 'reports.manage')
-      ? `<div class="card"><div class="card-head"><div><h3>Activity, last 14 days</h3><p>Sign-ups, SOS requests and reports per day</p></div></div>
+    const chart = can('users.view', 'users.manage', 'blood.view', 'blood.manage', 'blood.contact', 'reports.view', 'reports.manage', 'orders.view', 'orders.manage', 'bookings.view', 'bookings.manage')
+      ? `<div class="card"><div class="card-head"><div><h3>Activity, last 14 days</h3><p>Per day, for what your role can see. Tap a name in the legend to hide or show its line.</p></div></div>
           <div class="chart-box"><canvas id="activityChart"></canvas></div></div>`
       : '';
 
@@ -951,6 +962,9 @@
       series('profiles', 'created_at', '#23C1C3', 'New users', can('users.view', 'users.manage')),
       series('blood_requests', 'created_at', '#EF4444', 'SOS requests', can('blood.view', 'blood.manage', 'blood.contact')),
       series('user_reports', 'created_at', '#F5A524', 'Reports', can('reports.view', 'reports.manage')),
+      series('pets', 'created_at', '#8B5CF6', 'Pets added', can('users.view', 'users.manage')),
+      series('service_bookings', 'created_at', '#3B82F6', 'Bookings', can('bookings.view', 'bookings.manage')),
+      series('orders', 'placed_at', '#10B981', 'Orders', can('orders.view', 'orders.manage')),
     ])).filter(Boolean);
     if (!document.getElementById('activityChart')) return;
     const dark = document.documentElement.dataset.theme === 'dark';
@@ -1147,6 +1161,208 @@
   };
 
   // ════════════════════════════════════════════════════════════════════════════
+  // Content review: one item at a time
+  // ════════════════════════════════════════════════════════════════════════════
+  // What each remove button does: the admin-action name, what to call the item,
+  // and what the confirmation says.
+  const CONTENT_ACTIONS = {
+    'review.remove': { title: 'Remove this review?', message: 'It is deleted and the provider’s rating is worked out again. The customer is told, and could review the booking again.', confirm: 'Remove review', done: 'Review removed.' },
+    'moment.remove': { title: 'Remove this Pet Moment?', message: 'The post and its picture are deleted. The person is told.', confirm: 'Remove Pet Moment', done: 'Pet Moment removed.' },
+    'donor.remove': { title: 'Remove this donor listing?', message: 'The pet leaves the blood donor directory. The owner is told, and could register again.', confirm: 'Remove listing', done: 'Donor listing removed.' },
+    'pet.hide': { title: 'Hide this pet from Pet Match?', message: 'Nobody sees the pet in Pet Match, and the owner cannot switch it back on until you lift the hold. The owner is told why.', confirm: 'Hide pet', done: 'Pet hidden from Pet Match.' },
+    'pet.unhide': { title: 'Lift the hold on this pet?', message: 'The owner can show the pet on Pet Match again (they choose when). The owner is told.', confirm: 'Lift hold', done: 'Hold lifted.', noReason: true },
+  };
+
+  const thumb = (url) => {
+    const src = safeUrl(url);
+    return src ? `<img src="${esc(src)}" alt="" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:10px">` : '<span class="avatar">🐾</span>';
+  };
+  const contentButton = (action, id, label, outline = 'btn-danger-outline') => (can('reports.manage') || (action === 'donor.remove' && can('blood.manage'))
+    ? `<button class="btn ${outline} btn-sm" data-action="content-act" data-id="${esc(`${action}|${id}`)}">${esc(label)}</button>` : '');
+
+  RENDER.content = async () => {
+    const canDonors = can('blood.contact', 'blood.manage');
+    const tabs = [['reviews', 'Reviews'], ['moments', 'Pet Moments'], ['pets', 'Pet Match pets'], ...(canDonors ? [['donors', 'Donor listings']] : [])];
+    const tab = tabs.some(([t]) => t === state.content.tab) ? state.content.tab : 'reviews';
+    let table = '';
+
+    if (tab === 'reviews') {
+      const rows = await q(sb.from('provider_reviews').select('id, provider_id, user_id, rating, comment, created_at')
+        .order('created_at', { ascending: false }).limit(LIST_LIMIT));
+      const people = await profilesFor(rows.map((r) => r.user_id));
+      const providers = {};
+      const ids = [...new Set(rows.map((r) => r.provider_id).filter(Boolean))];
+      if (ids.length) {
+        const { data } = await sb.from('service_providers').select('id, full_name, city').in('id', ids);
+        (data || []).forEach((x) => { providers[x.id] = x; });
+      }
+      table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+        <th>Provider</th><th>Rating</th><th>What they wrote</th><th class="hide-sm">By</th><th>When</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr>
+          <td><div class="cell-main">${esc(providers[r.provider_id]?.full_name || 'Provider')}</div><div class="cell-sub">${esc(providers[r.provider_id]?.city || '')}</div></td>
+          <td class="nowrap">${esc('★'.repeat(Math.max(0, Math.min(5, Number(r.rating) || 0))))} <span class="cell-sub">${esc(r.rating)}/5</span></td>
+          <td>${r.comment ? `<div class="quote">${esc(r.comment)}</div>` : '<span class="cell-sub">No comment</span>'}</td>
+          <td class="hide-sm">${personCell(people[r.user_id], r.user_id)}</td>
+          <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+          <td class="actions">${contentButton('review.remove', r.id, 'Remove')}</td></tr>`).join('')}</tbody></table></div>`
+        : emptyHtml('⭐', 'No reviews yet', 'Reviews customers leave for providers appear here.');
+    }
+
+    if (tab === 'moments') {
+      const rows = await q(sb.from('moments').select('id, user_id, photo_url, caption, created_at')
+        .order('created_at', { ascending: false }).limit(LIST_LIMIT));
+      const people = await profilesFor(rows.map((r) => r.user_id));
+      table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+        <th>Picture</th><th>Caption</th><th>By</th><th>When</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr>
+          <td>${safeUrl(r.photo_url) ? `<a href="${esc(safeUrl(r.photo_url))}" target="_blank" rel="noopener noreferrer">${thumb(r.photo_url)}</a>` : thumb(null)}</td>
+          <td>${r.caption ? esc(r.caption) : '<span class="cell-sub">No caption</span>'}</td>
+          <td>${personCell(people[r.user_id], r.user_id)}</td>
+          <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}</td>
+          <td class="actions">${contentButton('moment.remove', r.id, 'Remove')}</td></tr>`).join('')}</tbody></table></div>`
+        : emptyHtml('📸', 'No Pet Moments yet', 'Photos people post on their profile appear here.');
+    }
+
+    if (tab === 'pets') {
+      const [rows, hides] = await Promise.all([
+        q(sb.from('pet_matches').select('pet_id, user_id, name, species, breed, owner_city, avatar_url, bio, is_pet_match_enabled, updated_at')
+          .order('updated_at', { ascending: false }).limit(LIST_LIMIT)),
+        q(sb.from('pet_match_staff_hides').select('pet_id, reason')),
+      ]);
+      const held = Object.fromEntries(hides.map((h) => [h.pet_id, h.reason]));
+      const people = await profilesFor(rows.map((r) => r.user_id));
+      table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+        <th>Pet</th><th>About</th><th class="hide-sm">Owner</th><th>On Pet Match</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr>
+          <td><div class="who">${thumb(r.avatar_url)}<div><div class="cell-main">${esc(r.name || 'Pet')}</div><div class="cell-sub">${esc([titleCase(r.species || ''), r.breed, r.owner_city].filter(Boolean).join(' · '))}</div></div></div></td>
+          <td>${r.bio ? esc(r.bio) : '<span class="cell-sub">No description</span>'}</td>
+          <td class="hide-sm">${personCell(people[r.user_id], r.user_id)}</td>
+          <td>${r.pet_id in held ? `${badge('Hidden by staff', 'red')}<div class="cell-sub">${esc(held[r.pet_id])}</div>` : (r.is_pet_match_enabled ? badge('Visible', 'green') : badge('Hidden by owner', 'slate'))}</td>
+          <td class="actions">${r.pet_id in held ? contentButton('pet.unhide', r.pet_id, 'Lift hold', 'btn-outline') : contentButton('pet.hide', r.pet_id, 'Hide')}</td></tr>`).join('')}</tbody></table></div>`
+        : emptyHtml('🐾', 'No pets on Pet Match yet', 'Every pet added in the app appears here.');
+    }
+
+    if (tab === 'donors') {
+      const rows = await q(sb.from('blood_donors').select('id, user_id, pet_name, species, breed, blood_group, city, is_available, created_at')
+        .order('created_at', { ascending: false }).limit(LIST_LIMIT));
+      const people = await profilesFor(rows.map((r) => r.user_id));
+      table = rows.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+        <th>Pet</th><th>Blood group</th><th>City</th><th class="hide-sm">Owner</th><th>Listed</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr>
+          <td><div class="cell-main">${esc(r.pet_name || 'Pet')}</div><div class="cell-sub">${esc([titleCase(r.species || ''), r.breed].filter(Boolean).join(' · '))}</div></td>
+          <td>${esc(r.blood_group || '—')}</td>
+          <td>${esc(r.city || '—')}</td>
+          <td class="hide-sm">${personCell(people[r.user_id], r.user_id)}</td>
+          <td class="nowrap" title="${esc(fmtDateTime(r.created_at))}">${esc(ago(r.created_at))}${r.is_available ? '' : '<div class="cell-sub">Not available now</div>'}</td>
+          <td class="actions">${contentButton('donor.remove', r.id, 'Remove')}</td></tr>`).join('')}</tbody></table></div>`
+        : emptyHtml('🩸', 'No donor listings yet', 'Pets registered as blood donors appear here.');
+    }
+
+    return `<div class="toolbar">${tabsHtml('content', 'tab', tabs, tab)}</div>
+      <div class="card">${table}</div>
+      <p class="note">The newest ${LIST_LIMIT} are shown. Removing one item needs a reason, tells its owner, and is written to the audit log. For someone who keeps posting things like this, suspend the account from Users.</p>`;
+  };
+
+  ACTIONS['content-act'] = async (id, el) => {
+    const [action, target] = id.split('|');
+    const c = CONTENT_ACTIONS[action];
+    if (!c) return;
+    const reason = await confirmBox({
+      title: c.title, message: c.message, confirmLabel: c.confirm, tone: c.noReason ? 'primary' : 'danger',
+      field: c.noReason ? null : { label: 'Reason (the owner sees this)', required: true, placeholder: 'e.g. Not a real review of this booking' },
+    });
+    if (reason == null) return;
+    await busy(el, async () => {
+      await act(action, target, c.noReason ? {} : { reason });
+      toast(c.done, 'success');
+      renderCurrent();
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // City requests: "Tell me when"
+  // ════════════════════════════════════════════════════════════════════════════
+  const INTEREST = {
+    clinics: { label: 'Vet clinics', one: 'vet clinic', table: 'vet_clinics', status: 'verification_status' },
+    blood_banks: { label: 'Blood banks', one: 'blood bank', table: 'blood_banks', status: 'verification_status' },
+    pet_services: { label: 'Pet care providers', one: 'pet care provider', table: 'service_providers', status: 'verification_status' },
+  };
+  const cityKey = (c) => String(c || '').trim().toLowerCase();
+  let cityGroups = [];
+
+  RENDER.cities = async () => {
+    const rows = await q(sb.from('service_interest').select('service, city, notified_at, created_at')
+      .order('created_at', { ascending: false }).limit(5000));
+    // What each city already has, so nobody is told about an empty list.
+    const listed = {};
+    await Promise.all(Object.entries(INTEREST).map(async ([service, t]) => {
+      const { data } = await sb.from(t.table).select('city').eq(t.status, 'approved').limit(5000);
+      listed[service] = {};
+      (data || []).forEach((x) => { const k = cityKey(x.city); if (k) listed[service][k] = (listed[service][k] || 0) + 1; });
+    }));
+    const groups = {};
+    rows.forEach((r) => {
+      const k = `${r.service}|${cityKey(r.city)}`;
+      const g = groups[k] || (groups[k] = { service: r.service, city: r.city, asked: 0, waiting: 0, last: r.created_at });
+      g.asked += 1;
+      if (!r.notified_at) g.waiting += 1;
+    });
+    cityGroups = Object.values(groups).map((g) => ({ ...g, listed: listed[g.service]?.[cityKey(g.city)] || 0 }))
+      .sort((a, b) => b.waiting - a.waiting || b.asked - a.asked);
+    const counts = { all: cityGroups.length };
+    cityGroups.forEach((g) => { counts[g.service] = (counts[g.service] || 0) + 1; });
+    const s = state.cities.service;
+    const list = s === 'all' ? cityGroups : cityGroups.filter((g) => g.service === s);
+
+    const table = list.length ? `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>City</th><th>Waiting for</th><th>People asked</th><th>Still to tell</th><th>Listed there now</th><th class="hide-sm">Last asked</th><th></th></tr></thead><tbody>
+      ${list.map((g) => `<tr>
+        <td><div class="cell-main">${esc(g.city)}</div></td>
+        <td>${esc(INTEREST[g.service]?.label || g.service)}</td>
+        <td>${esc(g.asked)}</td>
+        <td>${g.waiting ? badge(String(g.waiting), 'amber') : badge('All told', 'green')}</td>
+        <td>${g.listed ? badge(String(g.listed), 'green') : '<span class="cell-sub">None yet</span>'}</td>
+        <td class="hide-sm nowrap" title="${esc(fmtDateTime(g.last))}">${esc(ago(g.last))}</td>
+        <td class="actions">${can('notifications.send') && g.waiting ? `<button class="btn btn-outline btn-sm" data-action="city-notify" data-id="${esc(cityGroups.indexOf(g))}">Tell them…</button>` : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : emptyHtml('📍', 'No requests yet', 'When someone taps “Tell me when” on an empty clinic, blood bank or pet care screen, their city appears here.');
+
+    return `<div class="toolbar">${tabsHtml('cities', 'service', [['all', 'All'], ['clinics', 'Vet clinics'], ['blood_banks', 'Blood banks'], ['pet_services', 'Pet care']], s, counts)}</div>
+      <div class="card">${table}</div>
+      <p class="note">The app promises these people “we’ll tell you”. Add or approve a listing in that city first, then press <strong>Tell them</strong>: each person gets one notification and an inbox message, once.</p>`;
+  };
+
+  ACTIONS['city-notify'] = (id) => {
+    const g = cityGroups[Number(id)];
+    const t = g && INTEREST[g.service];
+    if (!g || !t) return;
+    const service = g.service;
+    openModal({
+      title: `Tell ${g.waiting} ${g.waiting === 1 ? 'person' : 'people'} in ${g.city}`,
+      subtitle: `They asked about ${t.label.toLowerCase()}`,
+      body: `
+        ${g.listed ? '' : `<p class="note" role="alert" style="margin-bottom:14px">⚠️ No approved ${esc(t.one)} is listed in ${esc(g.city)} yet. They would open an empty screen. Add one first.</p>`}
+        <div class="field"><label for="cnTitle">Title *</label><input class="input" id="cnTitle" maxlength="80" value="${esc(`${t.label} are now in ${g.city} 🐾`)}"></div>
+        <div class="field"><label for="cnBody">Message *</label><textarea class="textarea" id="cnBody" maxlength="300">${esc(`You asked us to tell you. Open Doggy Ji to see the ${t.label.toLowerCase()} listed in ${g.city}.`)}</textarea></div>`,
+      foot: `<button class="btn btn-ghost" data-action="close-modal">Cancel</button>
+             <button class="btn btn-primary" data-action="m" data-id="send">Send to ${esc(g.waiting)}</button>`,
+      handlers: {
+        send: async (btn) => {
+          const title = $('#cnTitle').value.trim();
+          const body = $('#cnBody').value.trim();
+          if (!title || !body) { toast('Write a title and a message.', 'warning'); return; }
+          await busy(btn, async () => {
+            const r = (await act('interest.notify', 'city', { service, city: g.city, title, body })) || {};
+            closeModal();
+            toast(`${r.notified ?? 0} ${r.notified === 1 ? 'person' : 'people'} told.`, 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
+    });
+  };
+
+  // ════════════════════════════════════════════════════════════════════════════
   // Users
   // ════════════════════════════════════════════════════════════════════════════
   RENDER.users = async () => {
@@ -1230,11 +1446,27 @@
           <div class="grow"><div class="cell-main">${esc(p.name)}</div><div class="cell-sub">${esc(p.breed || titleCase(p.species))}</div></div>
           <span class="cell-sub">${esc(fmtDate(p.created_at))}</span></div>`).join('')}</div>` : '<p class="note" style="margin:0">No pets added.</p>'}`,
       foot: can('users.manage')
-        ? `<button class="btn btn-ghost" data-action="m" data-id="erase" style="margin-right:auto;color:var(--red)">Delete account…</button>${
+        ? `<button class="btn btn-ghost" data-action="m" data-id="erase" style="color:var(--red)">Delete account…</button>
+          <button class="btn btn-ghost" data-action="m" data-id="export" style="margin-right:auto">Export data…</button>${
           susp ? '<button class="btn btn-primary" data-action="m" data-id="restore">Restore account</button>'
             : '<button class="btn btn-danger" data-action="m" data-id="suspend">Suspend account</button>'}`
         : '',
       handlers: {
+        export: async (btn) => {
+          const reason = await confirmBox({
+            title: 'Export a copy of this person’s data?',
+            message: 'Downloads their own records (profile, pets, listings, bookings, reviews, orders) as a file, for when they ask for a copy. Chats are left out: they are other people’s data too. The export is written to the audit log.',
+            confirmLabel: 'Export',
+            field: { label: 'Reason', required: true, placeholder: 'e.g. The person asked for a copy by email on 11 Nov' },
+          });
+          if (reason == null) return;
+          await busy(btn, async () => {
+            const r = (await act('user.export', id, { reason })) || {};
+            if (!r.export) throw new Error('Nothing came back to download.');
+            download(`doggyji-user-${id}.json`, JSON.stringify(r.export, null, 2));
+            toast('Copy downloaded. Send it only to the person themselves.', 'success');
+          });
+        },
         erase: async (btn) => {
           const who = u.full_name || (u.username ? `@${u.username}` : 'this person');
           const reason = await confirmBox({
@@ -3106,7 +3338,13 @@
   }
 
   const ORDER_STATUSES = [['', 'All statuses'], ['placed', 'Placed'], ['shipped', 'Shipped'],
-    ['outForDelivery', 'Out for delivery'], ['delivered', 'Delivered'], ['cancelled', 'Cancelled']];
+    ['outForDelivery', 'Out for delivery'], ['delivered', 'Delivered'], ['cancelled', 'Cancelled'],
+    ['refund_due', 'Cancelled in the app: refund due']];
+  // Why a customer cancelled in the app (orders.cancel_reason).
+  const CANCEL_REASONS = {
+    mistake: 'Ordered by mistake', price: 'Found a better price', address: 'Change the delivery address',
+    change_items: 'Change the items or quantity', too_slow: 'Delivery will take too long', other: 'Other',
+  };
   const ORDER_RANGES = [['all', 'All time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['7d', 'Last 7 days'],
     ['30d', 'Last 30 days'], ['month', 'This month'], ['lastmonth', 'Last month'], ['custom', 'Custom dates…']];
   const ORDER_SORTS = [['new', 'Newest first'], ['old', 'Oldest first'], ['high', 'Highest total'], ['low', 'Lowest total']];
@@ -3137,7 +3375,8 @@
   /** Every filter except the source tab (the tabs count within the others). */
   function orderFilters(b, f, { source = true } = {}) {
     let x = source ? bySource(f.source || 'all')(b) : b;
-    if (f.status) x = x.eq('status', f.status);
+    if (f.status === 'refund_due') x = x.eq('cancel_refund_due', true);
+    else if (f.status) x = x.eq('status', f.status);
     const [from, to] = orderRange(f);
     if (from) x = x.gte('placed_at', from.toISOString());
     if (to) x = x.lt('placed_at', to.toISOString());
@@ -3290,7 +3529,29 @@
           <div class="detail"><div class="k">Discount${o.coupon_code ? ` (${esc(o.coupon_code)})` : ''}</div><div class="v">${esc(money(o.discount_amount))}</div></div>
           <div class="detail"><div class="k">Shipping</div><div class="v">${esc(money(o.shipping_amount))}</div></div>
           <div class="detail"><div class="k">Total</div><div class="v cell-main">${esc(money(o.total_amount))}</div></div>
-        </div>`,
+        </div>
+        ${o.cancel_requested_at ? `<div class="section-title">Cancelled by the customer in the app</div>
+          <div class="detail-grid">
+            <div class="detail"><div class="k">When</div><div class="v">${esc(fmtDateTime(o.cancel_requested_at))}</div></div>
+            <div class="detail"><div class="k">Reason</div><div class="v">${esc(CANCEL_REASONS[o.cancel_reason] || o.cancel_reason || '—')}</div></div>
+            ${o.cancel_note ? `<div class="detail full"><div class="k">In their words</div><div class="quote">${esc(o.cancel_note)}</div></div>` : ''}
+            <div class="detail full"><div class="k">Refund</div><div class="v">${o.cancel_refund_due
+    ? `${badge('To do', 'amber')} Refund ${esc(money(o.total_amount))} in Shopify (Orders → this order → Refund), then mark it done here.`
+    : (o.payment_method === 'cod' ? 'Nothing was paid (cash on delivery).' : badge('Done', 'green'))}</div></div>
+          </div>` : ''}`,
+      foot: o.cancel_refund_due && can('orders.manage')
+        ? '<button class="btn btn-primary" data-action="m" data-id="refunded">Refund done</button>' : '',
+      handlers: {
+        refunded: async (btn) => {
+          const ok = await confirmBox({ title: 'Refund done in Shopify?', message: `Mark ${o.id} as refunded. Do this only after the refund shows in Shopify.`, confirmLabel: 'Mark as refunded' });
+          if (ok == null) return;
+          await busy(btn, async () => {
+            await act('order.refund_done', o.id);
+            toast('Marked as refunded.', 'success');
+            renderCurrent(); refreshCounts();
+          });
+        },
+      },
     });
   };
 
