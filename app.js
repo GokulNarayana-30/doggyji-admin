@@ -2914,7 +2914,7 @@
     if (!a) return '';
     return `<details class="card" style="padding:12px 16px;margin-bottom:12px">
       <summary><strong>Automatic replies</strong> · ${a.enabled ? badge('On', 'green') : badge('Off', 'slate')}</summary>
-      <p class="hint">When a customer starts a conversation (their first message, or the first after 12 hours or after you closed it), the chat answers at once with the greeting. When they reply to it, the follow-up goes once. Neither marks the conversation as answered, and neither sends a push. <code>{name}</code> becomes the customer's first name.</p>
+      <p class="hint">When a customer writes and nobody from Doggy Ji has written to them in the last 12 hours (or you closed the conversation), the chat answers at once with the greeting. When they reply to it, the follow-up goes once. Neither marks the conversation as answered, and neither sends a push. <code>{name}</code> becomes the customer's first name.</p>
       <div class="field"><label class="check"><input type="checkbox" id="arEnabled" ${a.enabled ? 'checked' : ''}> Send automatic replies</label></div>
       <div class="field"><label for="arGreeting">Greeting *</label><textarea class="textarea" id="arGreeting" maxlength="1000">${esc(a.greeting)}</textarea></div>
       <div class="field"><label for="arFollowup">Follow-up *</label><textarea class="textarea" id="arFollowup" maxlength="1000">${esc(a.followup)}</textarea></div>
